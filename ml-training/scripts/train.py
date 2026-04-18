@@ -2,7 +2,11 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
+
+# Disable Ultralytics' wandb callback (it rejects absolute paths as project names).
+os.environ.setdefault("WANDB_MODE", "disabled")
 
 import torch
 import yaml
