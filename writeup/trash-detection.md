@@ -12,8 +12,8 @@ Non-goals:
 - Semantic segmentation of trash. A bbox is enough for visual servoing.
 - Running on the phone. The robot phone is a sensor, not a compute node.
 
-Target performance on the Jetson Orin Nano:
-- **15+ FPS** at 640×480 (matches CLAUDE.md's existing target).
+Target performance on the **brain machine** (Mac laptop for the hackathon prototype; Jetson Orin Nano in a future self-contained deployment):
+- **15+ FPS** at 640×480. On a Mac M-series this is easy with `.pt`. On the Jetson, requires TensorRT FP16 export (`.engine`).
 - **Recall ≥ 0.85** at confidence 0.5 on a held-out Rutgers test set.
 - **Precision ≥ 0.7** at the same threshold. Missing trash (low recall) is worse than a brief false-positive chase (low precision); we tune to favor recall.
 
@@ -100,7 +100,7 @@ yolo train model=runs/trash/taco_finetune/weights/best.pt \
            project=runs/trash name=rutgers_finetune
 ```
 
-Target: run this on a laptop with a decent GPU, **not** the Jetson. Jetson is for inference only.
+Training runs on Colab (A100/T4) per [ml-training/TRAINING.md](../ml-training/TRAINING.md), not on the brain machine. Inference runs on the brain machine at runtime (Mac for prototype, Jetson later).
 
 ### Hyperparameters to touch (and nothing else)
 
@@ -124,7 +124,7 @@ Two datasets matter:
 Metrics:
 - **mAP@50** — primary. Target: >0.7 on Rutgers.
 - **Recall@conf=0.5** — secondary. We favor recall. Target: >0.85.
-- **FPS on Jetson** after TensorRT export. Target: >15.
+- **FPS on the brain machine** (Mac `.pt` or future Jetson `.engine`). Target: >15 at 640×480.
 
 Failure modes to explicitly test:
 - Trash partially occluded by grass.
@@ -133,12 +133,26 @@ Failure modes to explicitly test:
 - Camera motion blur (robot moving, trash small).
 - Common false-positive candidates: dead leaves, dark rocks, mulch. Add 20-30 "hard negatives" (Rutgers photos with NO trash) to the test set.
 
-## Deployment to Jetson
+## Deployment
 
-Once the PyTorch `.pt` converges:
+### On the brain machine (Mac — current prototype)
+
+Load the trained `.pt` directly via Ultralytics. No export step required.
+
+```python
+from ultralytics import YOLO
+model = YOLO("trash_v1_best.pt")
+results = model.predict(frame)
+```
+
+`jetson/perception/detector.py` already does this — the folder name is historical, the code runs on the Mac for the prototype.
+
+### On a future Jetson (self-contained robot)
+
+Export to TensorRT once the `.pt` converges:
 
 ```bash
-# Export to ONNX
+# Export to ONNX (can run anywhere)
 yolo export model=best.pt format=onnx imgsz=640 opset=12
 
 # On the Jetson: convert ONNX to TensorRT engine
@@ -149,9 +163,9 @@ yolo export model=best.pt format=onnx imgsz=640 opset=12
     --workspace=4096
 ```
 
-FP16 is the right tradeoff on Orin Nano — ~2× speedup vs FP32 with negligible accuracy loss. INT8 quantization gives another 2× but needs a calibration dataset; skip for MVP.
+FP16 is the right tradeoff on Orin Nano — ~2× speedup vs FP32 with negligible accuracy loss. INT8 quantization gives another 2× but needs a calibration dataset; skip until needed.
 
-`jetson/perception/detector.py` loads the engine at startup per the CLAUDE.md contract.
+**The same `detector.py` loads `.pt` or `.engine`** — Ultralytics handles both formats. No code change when we switch.
 
 ## Decisions to make before starting
 
@@ -171,11 +185,12 @@ Each stage is a checkpoint. Don't move to the next until the current one passes 
 | B | Trained on TACO, binary | [ml-training/models/yolo_taco.pt](../ml-training/models/yolo_taco.pt) | mAP@50 >0.5 on TACO test split |
 | C | ~200 labeled Rutgers photos in hand | [ml-training/data/rutgers/](../ml-training/data/rutgers/) | Roboflow export in YOLO format, train/val/test split |
 | D | Fine-tuned on Rutgers | [ml-training/models/yolo_trash.pt](../ml-training/models/yolo_trash.pt) | mAP@50 >0.7 on Rutgers test split |
-| E | Exported to TensorRT | [ml-training/models/yolo_trash.engine](../ml-training/models/yolo_trash.engine) | `trtexec` runs without errors |
-| F | Running on Jetson at 15+ FPS | [jetson/perception/detector.py](../jetson/perception/detector.py) | Benchmark log shows 15+ FPS sustained, detections published to `LatestDetections` |
-| G | Integrated into nav state machine | updated [jetson/main.py](../jetson/main.py) | In SEARCHING, YOLO detections trigger state transition to APPROACHING |
+| E | Running on brain machine (Mac) with `.pt` | [jetson/perception/detector.py](../jetson/perception/detector.py) | Live webcam detection at 15+ FPS via `tools/live_detect.py` |
+| F | Frames flowing from Pi MJPEG → brain detector | new frame-consumer in `jetson/io/` | Point Pi at a bottle from the room next door; detections show up on the Mac |
+| G | Integrated into nav state machine | [jetson/main.py](../jetson/main.py) | In SEARCHING, YOLO detections trigger state transition to APPROACHING |
+| H | (future) Exported to TensorRT for on-robot Jetson | [ml-training/models/yolo_trash.engine](../ml-training/models/yolo_trash.engine) | Benchmark shows 15+ FPS on Orin Nano |
 
-Stages A–E are laptop work. F–G need the Jetson and camera wired up. A–B can happen today. C is the field-work bottleneck.
+Stages A–E are laptop work. F needs the Pi streaming camera frames. G needs the full link (iPhone + Pi + relay) up. H is deferred until we swap the brain role from Mac to Jetson.
 
 ## Why NOT
 

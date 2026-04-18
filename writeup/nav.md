@@ -4,9 +4,9 @@ How the robot gets from "task received" to "trash inside the intake." Read [CLAU
 
 ## Ownership
 
-This doc is the **backend / CV scope** — what runs on the Jetson.
+This doc is the **backend / CV scope** — what runs on the **brain machine** (the developer laptop/Mac for the hackathon prototype; a Jetson Orin Nano in a future self-contained deployment). The code lives under `jetson/` in the repo — that folder name is historical, not a deployment location. See [CLAUDE.md](CLAUDE.md) for the split-compute architecture: brain on laptop, Pi on robot as an I/O proxy, WebSocket + MJPEG between them.
 
-**Out of scope (someone else owns):** getting iPhone sensor data onto the robot. A teammate is building the iPhone → Raspberry Pi integration. By the time this code runs, the current robot GPS, heading, and orientation are already available on the Jetson. The exact transport (serial message format from the Pi, or direct WiFi) is their decision — we just consume a `SensorReading` struct.
+**Out of scope (someone else owns):** getting iPhone sensor data onto the brain machine. By the time this code runs, the robot's current GPS and heading are available via `LatestSensorState` — the iPhone posts heartbeats directly to the brain over local WiFi, or polls through the relay. Either way, we just consume a `SensorReading` struct.
 
 **In scope (this doc):**
 1. Consume local robot pose data (GPS, heading, orientation) arriving from upstream.
@@ -20,15 +20,15 @@ The CV network is a cross-cutting concern that runs throughout nav, with escalat
 ## What nav has to do
 
 Given (arriving from upstream — we consume, not produce):
-1. **GPS coords** — robot's current `(lat, lon, h_accuracy_m)`, updated at ~10Hz. Exact arrival path is owned by the iPhone-integration teammate.
-2. **Orientation** — robot's current `heading_deg` (true north, clockwise) and any IMU data.
+1. **GPS coords** — robot's current `(lat, lon, h_accuracy_m)`, updated at ~10Hz, posted by the robot iPhone to the brain machine over local WiFi.
+2. **Orientation** — robot's current `heading_deg` (true north, clockwise) and any IMU data from the same iPhone.
 3. **Walk path** — ordered list of `(lat, lon)` waypoints from Apple Maps via the relay's `POST /routes/apple`.
 4. **Target photo** — reporter's image of the trash. Primary use is the GPS tag it carries.
-5. **Camera** — live C270 webcam feed on the Jetson. Used continuously (course confirmation + obstacle detection), and as the primary nav signal during final approach.
+5. **Camera** — live C270 webcam feed. Physically connected to the Pi; streamed to the brain over MJPEG on WiFi (prototype) or attached directly to the brain (future Jetson deployment).
 
 Produce:
-- `M,<left_pwm>,<right_pwm>\n` to the Pi at 10Hz.
-- `I,<pwm>\n` to the Pi when intaking.
+- Drive command `{"cmd":"drive","left":<int>,"right":<int>}` over WebSocket to the Pi at 10Hz.
+- Intake command `{"cmd":"intake","pwm":<int>}` over WebSocket when intaking.
 
 Nav is **not** one model. It's three layers plus a cross-cutting CV network, each simple and boring:
 - **Outer loop**: waypoint follower (GPS + heading → bearing error → differential drive).
@@ -88,7 +88,7 @@ Same as before — YOLO `trash` detections drive the control loop directly. Only
 
 ### Single inference pass
 
-One YOLO forward pass per frame outputs all three jobs: segmentation mask, detection list with class+bbox, and a derived per-detection distance estimate. Don't run three separate models — tax the Jetson once per frame.
+One YOLO forward pass per frame outputs all three jobs: segmentation mask, detection list with class+bbox, and a derived per-detection distance estimate. Don't run three separate models — tax the brain once per frame.
 
 Module layout:
 - [jetson/perception/detector.py](../jetson/perception/detector.py) — owns the inference loop, publishes to shared state.
@@ -198,7 +198,7 @@ If you were expecting an end-to-end learned nav policy: no. Hackathon constraint
 
 ## Open decisions
 
-1. **Pose-to-Jetson wire format** — the iPhone integration teammate needs to agree on what arrives on the Jetson. Minimum required: `{ts, lat, lon, h_accuracy_m, heading_deg}`. IMU (accel/gyro) is a nice-to-have. This doc doesn't specify the wire — ping the teammate.
+1. **Pose-to-brain wire format** — minimum required: `{ts, lat, lon, h_accuracy_m, heading_deg}`. IMU (accel/gyro) is a nice-to-have. Transport is HTTP POST from the iPhone directly to the brain's FastAPI endpoint on port 8000 (see CLAUDE.md).
 2. **Heading quality** — iPhone compass is noisy and sensitive to motors (see CLAUDE.md hardware constraints). Add a sanity check: reject heading that jumps >90° between 100ms samples.
 3. **Apple Maps polyline decoding** — Apple returns encoded polylines. Need a decoder in [jetson/nav/waypoint_follower.py](../jetson/nav/waypoint_follower.py). Use a tested library port, don't roll your own.
 4. **Waypoint density** — Apple Maps returns coarse waypoints at turn points. We may want to interpolate intermediate points every N meters so the control loop has a nearer target to chase. Start without; add if the robot oscillates.
@@ -223,7 +223,7 @@ Each stage should be demo-able standalone before moving on.
 | 8 | Visual search + approach (Job 3) | [jetson/perception/servo.py](../jetson/perception/servo.py) | At 3m, robot finds YOLO detection and closes to 0.5m |
 | 9 | End-to-end: report → route → drive → intake | Glue in [jetson/main.py](../jetson/main.py) | Reporter posts a photo; robot picks it up |
 
-Stages 0–3 are a weekend. Stage 4 needs the Pi/ultrasonics wired up. Stages 5–8 need YOLO exported to TensorRT and sufficient labeled data. Stage 9 depends on the teammate's iPhone → Pi integration landing.
+Stages 0–3 are a weekend. Stage 4 needs the Pi/ultrasonics wired up + WebSocket link to the brain. Stages 5–8 need the C270 streaming MJPEG from the Pi to the brain and sufficient labeled data; TensorRT export is only required for the future Jetson deployment — on the brain Mac, `.pt` weights load directly. Stage 9 depends on the iPhone streaming GPS to the brain and the relay being up.
 
 ## Testing without the robot
 
