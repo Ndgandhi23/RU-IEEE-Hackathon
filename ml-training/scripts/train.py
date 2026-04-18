@@ -5,11 +5,10 @@ import argparse
 from pathlib import Path
 
 import torch
+import yaml
 from ultralytics import YOLO
-from ultralytics.utils import SETTINGS
 
 ROOT = Path(__file__).resolve().parent.parent
-SETTINGS["datasets_dir"] = str(ROOT)
 
 
 def pick_device() -> str | int:
@@ -18,6 +17,16 @@ def pick_device() -> str | int:
     if torch.backends.mps.is_available():
         return "mps"
     return "cpu"
+
+
+def absolute_data_yaml() -> Path:
+    """Write a copy of data.yaml with `path` as an absolute path.
+    Ultralytics otherwise prepends its own datasets_dir to relative paths."""
+    cfg = yaml.safe_load((ROOT / "data.yaml").read_text())
+    cfg["path"] = str(ROOT / "data")
+    out = ROOT / "data_abs.yaml"
+    out.write_text(yaml.safe_dump(cfg, sort_keys=False))
+    return out
 
 
 def main() -> None:
@@ -35,9 +44,10 @@ def main() -> None:
     print(f"device: {device}")
 
     cache_val: bool | str = False if args.cache.lower() == "false" else args.cache
+    data_yaml = absolute_data_yaml()
     model = YOLO(args.weights)
     model.train(
-        data=str(ROOT / "data.yaml"),
+        data=str(data_yaml),
         epochs=args.epochs,
         imgsz=args.imgsz,
         batch=args.batch,

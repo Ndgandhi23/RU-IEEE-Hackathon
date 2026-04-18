@@ -4,11 +4,18 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import yaml
 from ultralytics import YOLO
-from ultralytics.utils import SETTINGS
 
 ROOT = Path(__file__).resolve().parent.parent
-SETTINGS["datasets_dir"] = str(ROOT)
+
+
+def absolute_data_yaml() -> Path:
+    cfg = yaml.safe_load((ROOT / "data.yaml").read_text())
+    cfg["path"] = str(ROOT / "data")
+    out = ROOT / "data_abs.yaml"
+    out.write_text(yaml.safe_dump(cfg, sort_keys=False))
+    return out
 
 
 def main() -> None:
@@ -18,9 +25,10 @@ def main() -> None:
     ap.add_argument("--imgsz", type=int, default=640)
     args = ap.parse_args()
 
+    data_yaml = absolute_data_yaml()
     model = YOLO(args.weights)
     metrics = model.val(
-        data=str(ROOT / "data.yaml"),
+        data=str(data_yaml),
         split=args.split,
         imgsz=args.imgsz,
         project=str(ROOT / "runs" / "eval"),
