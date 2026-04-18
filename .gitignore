@@ -1,0 +1,18 @@
+# Relay service
+relay/node_modules/
+relay/.env
+relay/.env.*
+!relay/.env.example
+relay/*.p8
+relay/uploads/*
+!relay/uploads/.gitkeep
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS / editor
+.DS_Store
+Thumbs.db

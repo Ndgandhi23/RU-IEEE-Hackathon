@@ -10,38 +10,61 @@ export type Coordinates = {
 export type TrashReport = {
   id: string;
   createdAt: string;
-  note?: string;
   photoUri: string;
   photoUrl?: string;
   reporterLocation: Coordinates;
-};
-
-export type RouteStep = {
-  instruction: string;
-  distanceMeters: number;
-  durationSeconds: number;
-};
-
-export type RoutePlan = {
-  provider: 'apple' | 'mock';
-  travelMode: 'walking';
-  distanceMeters: number;
-  durationSeconds: number;
-  source: Coordinates;
-  destination: Coordinates;
-  polyline?: string;
-  steps: RouteStep[];
+  status?: 'pending' | 'assigned' | 'completed';
 };
 
 export type RouteResponseMode = 'backend' | 'mock';
 
+export type RobotTaskStatus = 'idle' | 'assigned';
+
+export type NavigationWaypoint = {
+  latitude: number;
+  longitude: number;
+};
+
+export type RobotNavigationStep = {
+  index: number;
+  instruction: string | null;
+  distanceMeters: number | null;
+  expectedTravelTimeSeconds: number | null;
+  waypoints: NavigationWaypoint[];
+};
+
+export type RobotNavigation = {
+  provider: 'apple-maps';
+  transportType: string;
+  distanceMeters: number | null;
+  expectedTravelTimeSeconds: number | null;
+  waypointCount: number;
+  waypoints: NavigationWaypoint[];
+  steps: RobotNavigationStep[];
+};
+
+export type RobotTask = {
+  id: string;
+  createdAt: string;
+  destination: Coordinates;
+  navigation: RobotNavigation | null;
+};
+
+export type RobotPacket = {
+  status: RobotTaskStatus;
+  current: Coordinates | null;
+  queue: {
+    pendingCount: number;
+  };
+  task: RobotTask | null;
+};
+
 export type SubmitReportInput = {
   photoUri: string;
   reporterLocation: Coordinates;
-  note?: string;
 };
 
-export type RouteRequestInput = {
-  origin: Coordinates;
-  destination: Coordinates;
+export type ReportFeed = {
+  activeAssignmentId: string | null;
+  reports: TrashReport[];
 };

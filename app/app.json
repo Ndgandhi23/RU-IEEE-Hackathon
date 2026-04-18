@@ -32,6 +32,12 @@
     "plugins": [
       "expo-router",
       [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow the app to open the live camera and capture litter reports."
+        }
+      ],
+      [
         "expo-image-picker",
         {
           "cameraPermission": "Allow the app to take photos of litter reports.",

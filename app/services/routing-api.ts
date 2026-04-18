@@ -1,23 +1,19 @@
 import {
   Coordinates,
-  RoutePlan,
-  RouteRequestInput,
+  ReportFeed,
+  RobotPacket,
   RouteResponseMode,
   SubmitReportInput,
   TrashReport,
 } from '@/types/routing';
 
 const API_BASE_URL = process.env.EXPO_PUBLIC_API_BASE_URL?.replace(/\/$/, '') ?? '';
-const walkingMetersPerSecond = 1.3;
-let localLatestReport: TrashReport | null = null;
+let localReports: TrashReport[] = [];
+let localLatestRobotLocation: Coordinates | null = null;
+let localAssignedReportId: string | null = null;
 
 type SubmitReportResponse = {
   report: TrashReport;
-  mode: RouteResponseMode;
-};
-
-type RoutePlanResponse = {
-  route: RoutePlan;
   mode: RouteResponseMode;
 };
 
@@ -28,7 +24,7 @@ export function hasRemoteBackend() {
 export async function submitTrashReport(input: SubmitReportInput): Promise<SubmitReportResponse> {
   if (!hasRemoteBackend()) {
     const report = createLocalReport(input);
-    localLatestReport = report;
+    localReports = [report, ...localReports];
     return { report, mode: 'mock' };
   }
 
@@ -43,7 +39,6 @@ export async function submitTrashReport(input: SubmitReportInput): Promise<Submi
   formData.append(
     'metadata',
     JSON.stringify({
-      note: input.note ?? '',
       reporterLocation: input.reporterLocation,
     })
   );
@@ -63,7 +58,7 @@ export async function submitTrashReport(input: SubmitReportInput): Promise<Submi
 
 export async function fetchLatestReport(): Promise<TrashReport | null> {
   if (!hasRemoteBackend()) {
-    return localLatestReport;
+    return localReports[0] ?? null;
   }
 
   const response = await fetch(`${API_BASE_URL}/reports/latest`);
@@ -79,12 +74,36 @@ export async function fetchLatestReport(): Promise<TrashReport | null> {
   return payload.report;
 }
 
-export async function sendRobotHeartbeat(location: Coordinates) {
+export async function fetchReportFeed(): Promise<ReportFeed> {
   if (!hasRemoteBackend()) {
-    return;
+    return {
+      activeAssignmentId: localAssignedReportId,
+      reports: [...localReports],
+    };
   }
 
-  await fetch(`${API_BASE_URL}/robot/heartbeat`, {
+  const response = await fetch(`${API_BASE_URL}/robot/queue`);
+  if (!response.ok) {
+    throw new Error(`Report feed fetch failed with ${response.status}`);
+  }
+
+  const payload = (await response.json()) as ReportFeed & {
+    latestRobotHeartbeat?: unknown;
+  };
+
+  return {
+    activeAssignmentId: payload.activeAssignmentId,
+    reports: payload.reports ?? [],
+  };
+}
+
+export async function sendRobotHeartbeat(location: Coordinates) {
+  if (!hasRemoteBackend()) {
+    localLatestRobotLocation = location;
+    return buildLocalRobotPacket();
+  }
+
+  const response = await fetch(`${API_BASE_URL}/robot/heartbeat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -92,72 +111,96 @@ export async function sendRobotHeartbeat(location: Coordinates) {
       sentAt: new Date().toISOString(),
     }),
   });
-}
 
-export async function buildRoutePlan(input: RouteRequestInput): Promise<RoutePlanResponse> {
-  if (!hasRemoteBackend()) {
-    return {
-      route: buildMockRoute(input.origin, input.destination),
-      mode: 'mock',
-    };
+  if (!response.ok) {
+    throw new Error(`Robot heartbeat failed with ${response.status}`);
   }
 
-  const response = await fetch(`${API_BASE_URL}/routes/apple`, {
+  const payload = (await response.json()) as { packet: RobotPacket };
+  return payload.packet;
+}
+
+export async function fetchRobotPacket(): Promise<RobotPacket> {
+  if (!hasRemoteBackend()) {
+    return buildLocalRobotPacket();
+  }
+
+  const response = await fetch(`${API_BASE_URL}/robot/packet`);
+  if (!response.ok) {
+    throw new Error(`Robot packet fetch failed with ${response.status}`);
+  }
+
+  const payload = (await response.json()) as { packet: RobotPacket };
+  return payload.packet;
+}
+
+export async function completeRobotTask(taskId: string): Promise<RobotPacket> {
+  if (!hasRemoteBackend()) {
+    const report = localReports.find((candidate) => candidate.id === taskId);
+    if (report) {
+      report.status = 'completed';
+      localAssignedReportId = null;
+    }
+
+    return buildLocalRobotPacket();
+  }
+
+  const response = await fetch(`${API_BASE_URL}/robot/task/complete`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      origin: input.origin,
-      destination: input.destination,
-      travelMode: 'walking',
+      taskId,
+      location: localLatestRobotLocation,
+      sentAt: new Date().toISOString(),
     }),
   });
 
   if (!response.ok) {
-    throw new Error(`Route request failed with ${response.status}`);
+    throw new Error(`Robot task completion failed with ${response.status}`);
   }
 
-  const payload = (await response.json()) as { route: RoutePlan };
-  return { route: payload.route, mode: 'backend' };
+  const payload = (await response.json()) as { packet: RobotPacket };
+  return payload.packet;
 }
 
 function createLocalReport(input: SubmitReportInput): TrashReport {
   return {
     id: `local-${Date.now()}`,
     createdAt: new Date().toISOString(),
-    note: input.note?.trim() || undefined,
     photoUri: input.photoUri,
     reporterLocation: input.reporterLocation,
+    status: 'pending',
   };
 }
 
-function buildMockRoute(origin: Coordinates, destination: Coordinates): RoutePlan {
-  const distanceMeters = haversineDistance(origin, destination);
-  const durationSeconds = Math.max(Math.round(distanceMeters / walkingMetersPerSecond), 30);
+function buildLocalRobotPacket(): RobotPacket {
+  if (!localAssignedReportId && localLatestRobotLocation) {
+    const nextReport = selectNearestPendingReport(localLatestRobotLocation, localReports);
+    if (nextReport) {
+      nextReport.status = 'assigned';
+      localAssignedReportId = nextReport.id;
+    }
+  }
+
+  const assignedReport = localReports.find((report) => report.id === localAssignedReportId) ?? null;
+  const pendingIds = localReports.filter((report) => report.status === 'pending').map((report) => report.id);
+  const assignedCount = localReports.filter((report) => report.status === 'assigned').length;
+  const completedCount = localReports.filter((report) => report.status === 'completed').length;
 
   return {
-    provider: 'mock',
-    travelMode: 'walking',
-    source: origin,
-    destination,
-    distanceMeters,
-    durationSeconds,
-    steps: [
-      {
-        instruction: 'Leave the robot staging point and align with the destination marker.',
-        distanceMeters: Math.round(distanceMeters * 0.35),
-        durationSeconds: Math.round(durationSeconds * 0.3),
-      },
-      {
-        instruction: 'Continue on the most direct safe campus walkway toward the reported trash.',
-        distanceMeters: Math.round(distanceMeters * 0.5),
-        durationSeconds: Math.round(durationSeconds * 0.55),
-      },
-      {
-        instruction: 'Slow down near the target and confirm the trash photo before pickup.',
-        distanceMeters: Math.round(distanceMeters * 0.15),
-        durationSeconds: Math.round(durationSeconds * 0.15),
-      },
-    ],
+    status: assignedReport ? 'assigned' : 'idle',
+    current: localLatestRobotLocation,
+    queue: {
+      pendingCount: pendingIds.length,
+    },
+    task: assignedReport
+      ? {
+          id: assignedReport.id,
+          createdAt: assignedReport.createdAt,
+          destination: assignedReport.reporterLocation,
+          navigation: null,
+        }
+      : null,
   };
 }
 
@@ -180,4 +223,13 @@ function haversineDistance(origin: Coordinates, destination: Coordinates) {
 
 function degreesToRadians(value: number) {
   return (value * Math.PI) / 180;
+}
+
+function selectNearestPendingReport(origin: Coordinates, reports: TrashReport[]) {
+  return reports
+    .filter((report) => report.status !== 'completed' && report.status !== 'assigned')
+    .sort(
+      (left, right) =>
+        haversineDistance(origin, left.reporterLocation) - haversineDistance(origin, right.reporterLocation)
+    )[0] ?? null;
 }
