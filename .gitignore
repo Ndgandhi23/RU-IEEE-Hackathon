@@ -1,0 +1,10 @@
+kaggle.json
+.kaggle/
+.env
+.env.local
+*.pem
+*.key
+
+.DS_Store
+__pycache__/
+*.pyc

@@ -29,7 +29,7 @@ A lightweight **relay** (Node/Express, under `relay/`) is the only server. It st
 | PLA 3D printed chassis + intake funnel | Structural. |
 
 ### Hardware constraints to remember
-- **No camera is used for navigation.** The webcam is only active during the visual servoing phase (last ~3m to target). Treat GPS as primary localization.
+- **GPS is primary localization.** The camera runs continuously during nav (course confirmation + obstacle detection — advisory), but only becomes the *primary* nav signal during final approach (last ~3m). See [nav.md](nav.md) for the CV network's three jobs.
 - **iPhone compass is sensitive to motor magnetic fields.** Always mount on a stalk well above the chassis. Recalibrate (figure-8 motion) after any physical change.
 - **The Pi has no logic.** Don't add behavior to the Pi. It executes motor commands (drive + intake) and reports sensor readings. Everything else lives on the Jetson.
 - **C270 fails in low light and rain.** Demo and test in daylight, dry conditions.
