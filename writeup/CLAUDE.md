@@ -2,6 +2,8 @@
 
 This file gives AI coding assistants the context needed to work on this repo. Read it before making changes.
 
+> **Start here for "what's happening right now":** [NEXT.md](../NEXT.md) at the repo root. It tracks the current state of the project (what's shipped, what's next, blockers). This doc is architecture + conventions; NEXT.md is the running status.
+
 ## Project: Trash Pickup Robot
 
 An outdoor autonomous robot that picks up litter on the Rutgers campus. Users submit photos of trash through a companion Expo app; the photo's GPS is used to locate the item. The robot routes to each reported location, finds the trash visually, and collects it with an intake motor.
