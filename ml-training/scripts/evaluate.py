@@ -3,9 +3,12 @@ from __future__ import annotations
 
 import argparse
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 os.environ.setdefault("WANDB_MODE", "disabled")
+subprocess.run([sys.executable, "-m", "pip", "uninstall", "-y", "wandb"], capture_output=True)
 
 import yaml
 from ultralytics import YOLO

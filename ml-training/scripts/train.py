@@ -3,10 +3,14 @@ from __future__ import annotations
 
 import argparse
 import os
+import subprocess
+import sys
 from pathlib import Path
 
-# Disable Ultralytics' wandb callback (it rejects absolute paths as project names).
+# Ultralytics' wandb callback rejects absolute paths as project names. Uninstall wandb so the
+# callback never loads. WANDB_MODE=disabled doesn't help because wandb still validates inputs.
 os.environ.setdefault("WANDB_MODE", "disabled")
+subprocess.run([sys.executable, "-m", "pip", "uninstall", "-y", "wandb"], capture_output=True)
 
 import torch
 import yaml
