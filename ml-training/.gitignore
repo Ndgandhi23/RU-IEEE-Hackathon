@@ -1,0 +1,15 @@
+venv/
+__pycache__/
+*.pyc
+data_abs.yaml
+
+data/taco/
+data/rutgers/
+data/images/
+data/labels/
+
+runs/
+
+models/*.pt
+models/*.onnx
+models/*.engine
