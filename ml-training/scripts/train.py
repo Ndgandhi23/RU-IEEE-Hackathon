@@ -6,8 +6,10 @@ from pathlib import Path
 
 import torch
 from ultralytics import YOLO
+from ultralytics.utils import SETTINGS
 
 ROOT = Path(__file__).resolve().parent.parent
+SETTINGS["datasets_dir"] = str(ROOT)
 
 
 def pick_device() -> str | int:
@@ -26,11 +28,13 @@ def main() -> None:
     ap.add_argument("--batch", type=int, default=16)
     ap.add_argument("--name", default="trash_v1")
     ap.add_argument("--device", default=None, help="cuda index, 'mps', or 'cpu'. Default: auto.")
+    ap.add_argument("--cache", default="ram", help="'ram', 'disk', or 'false'. Default: ram (fast, needs memory).")
     args = ap.parse_args()
 
     device = args.device if args.device is not None else pick_device()
     print(f"device: {device}")
 
+    cache_val: bool | str = False if args.cache.lower() == "false" else args.cache
     model = YOLO(args.weights)
     model.train(
         data=str(ROOT / "data.yaml"),
@@ -41,6 +45,7 @@ def main() -> None:
         project=str(ROOT / "runs" / "train"),
         name=args.name,
         device=device,
+        cache=cache_val,
         augment=True,
         hsv_h=0.015,
         hsv_s=0.7,

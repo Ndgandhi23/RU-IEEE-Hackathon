@@ -1,13 +1,12 @@
-"""Download the Kaggle 'drinking-waste-classification' dataset and append to our YOLO splits.
+"""Download the Kaggle 'arkadiyhacks/drinking-waste-classification' dataset and append to our YOLO splits.
 
 Requires kaggle CLI auth: either ~/.kaggle/kaggle.json or KAGGLE_USERNAME + KAGGLE_KEY env.
 
-Class remap (source -> our canonical):
-  Aluminium can  -> 2 (can)
-  Plastic bottle -> 0 (bottle)
-  PET bottle     -> 0 (bottle)
-  HDPE bottle    -> 0 (bottle)
-  Glass bottle   -> SKIPPED (no glass per CLAUDE.md)
+The dataset ships 4 classes (index order defined by the dataset):
+  0: ACan         -> our class 2 (can)
+  1: Glass bottle -> DROPPED (no glass per CLAUDE.md)
+  2: HDPE-M       -> our class 0 (bottle)
+  3: PET          -> our class 0 (bottle)
 """
 from __future__ import annotations
 
@@ -23,21 +22,8 @@ DATA_DIR = ROOT / "data"
 RAW_DIR = DATA_DIR / "drink_waste"
 KAGGLE_SLUG = "arkadiyhacks/drinking-waste-classification"
 
-SOURCE_NAME_TO_CLASS: dict[str, int] = {
-    "aluminiumcan": 2,
-    "acan": 2,
-    "aluminium_can": 2,
-    "plasticbottle": 0,
-    "pbottle": 0,
-    "plastic_bottle": 0,
-    "pet": 0,
-    "petbottle": 0,
-    "hdpe": 0,
-    "hdpe-m": 0,
-    "hdpem": 0,
-    "milkbottle": 0,
-    # glass bottles intentionally absent -> dropped
-}
+SOURCE_CLASSES: list[str] = ["ACan", "Glass bottle", "HDPE-M", "PET"]
+CLASS_MAP: dict[int, int | None] = {0: 2, 1: None, 2: 0, 3: 0}
 
 TRAIN_FRAC, VAL_FRAC = 0.7, 0.2
 SEED = 42
@@ -45,7 +31,8 @@ SEED = 42
 
 def ensure_downloaded() -> Path:
     RAW_DIR.mkdir(parents=True, exist_ok=True)
-    if any(RAW_DIR.rglob("*.jpg")) or any(RAW_DIR.rglob("*.JPG")) or any(RAW_DIR.rglob("*.png")):
+    has_images = any(p.suffix.lower() in (".jpg", ".jpeg", ".png") for p in RAW_DIR.rglob("*") if p.is_file())
+    if has_images:
         print(f"{RAW_DIR} already has images, skipping download")
         return RAW_DIR
     print(f"downloading {KAGGLE_SLUG} ...")
@@ -60,49 +47,38 @@ def ensure_downloaded() -> Path:
     return RAW_DIR
 
 
-def read_classes_file(root: Path) -> dict[int, int] | None:
-    """Find classes.txt / _classes.txt / obj.names and return source_idx -> our_class (or None to drop)."""
-    candidates = list(root.rglob("classes.txt")) + list(root.rglob("_classes.txt")) + list(root.rglob("obj.names"))
-    if not candidates:
-        return None
-    names = [n.strip() for n in candidates[0].read_text().splitlines() if n.strip()]
-    mapping: dict[int, int] = {}
-    for i, name in enumerate(names):
-        key = name.lower().replace(" ", "").replace("_", "").replace("-", "")
-        if key in SOURCE_NAME_TO_CLASS:
-            mapping[i] = SOURCE_NAME_TO_CLASS[key]
-        elif "glass" in key:
-            continue  # explicitly skip glass
-        else:
-            # Best-effort substring match.
-            for src, dst in SOURCE_NAME_TO_CLASS.items():
-                if src in key or key in src:
-                    mapping[i] = dst
-                    break
-    print(f"source classes: {names}")
-    print(f"remap: {mapping}  (indices missing = dropped)")
-    return mapping
+def print_tree(root: Path, max_depth: int = 3) -> None:
+    print(f"\ntree of {root} (depth={max_depth}):")
+    for p in sorted(root.rglob("*")):
+        depth = len(p.relative_to(root).parts)
+        if depth > max_depth:
+            continue
+        indent = "  " * (depth - 1)
+        print(f"{indent}{p.name}{'/' if p.is_dir() else ''}")
 
 
 def find_image_label_pairs(root: Path) -> list[tuple[Path, Path]]:
-    """Walk root, pair each image with its sibling .txt (YOLO format)."""
-    pairs = []
+    """Pair each image with its label (.txt with same stem, same dir first, else anywhere under root)."""
+    txts_by_stem: dict[str, list[Path]] = {}
+    for txt in root.rglob("*.txt"):
+        txts_by_stem.setdefault(txt.stem, []).append(txt)
+
+    pairs: list[tuple[Path, Path]] = []
     for img in root.rglob("*"):
-        if img.suffix.lower() not in (".jpg", ".jpeg", ".png"):
+        if not img.is_file() or img.suffix.lower() not in (".jpg", ".jpeg", ".png"):
             continue
-        lbl = img.with_suffix(".txt")
-        if not lbl.exists():
-            # try same stem, different dir
-            hits = list(root.rglob(f"{img.stem}.txt"))
-            if not hits:
-                continue
-            lbl = hits[0]
-        pairs.append((img, lbl))
+        sibling = img.with_suffix(".txt")
+        if sibling.exists():
+            pairs.append((img, sibling))
+            continue
+        candidates = txts_by_stem.get(img.stem, [])
+        if candidates:
+            pairs.append((img, candidates[0]))
     return pairs
 
 
-def remap_label(src_label: Path, class_map: dict[int, int]) -> str:
-    out_lines = []
+def remap_label(src_label: Path) -> str:
+    out = []
     for line in src_label.read_text().splitlines():
         parts = line.strip().split()
         if len(parts) != 5:
@@ -111,11 +87,11 @@ def remap_label(src_label: Path, class_map: dict[int, int]) -> str:
             src_cls = int(parts[0])
         except ValueError:
             continue
-        if src_cls not in class_map:
+        dst = CLASS_MAP.get(src_cls)
+        if dst is None:
             continue
-        dst_cls = class_map[src_cls]
-        out_lines.append(f"{dst_cls} {parts[1]} {parts[2]} {parts[3]} {parts[4]}")
-    return "\n".join(out_lines) + ("\n" if out_lines else "")
+        out.append(f"{dst} {parts[1]} {parts[2]} {parts[3]} {parts[4]}")
+    return "\n".join(out) + ("\n" if out else "")
 
 
 def main() -> None:
@@ -124,14 +100,14 @@ def main() -> None:
     args = ap.parse_args()
 
     ensure_downloaded()
-    class_map = read_classes_file(RAW_DIR)
-    if class_map is None:
-        raise SystemExit(
-            "Could not find a classes.txt / obj.names. Inspect data/drink_waste/ and update SOURCE_NAME_TO_CLASS."
-        )
+    print(f"source classes (hardcoded): {SOURCE_CLASSES}")
+    print(f"remap: {CLASS_MAP}  (None = dropped)")
 
     pairs = find_image_label_pairs(RAW_DIR)
     print(f"found {len(pairs)} image+label pairs")
+    if not pairs:
+        print_tree(RAW_DIR, max_depth=3)
+        raise SystemExit("no image+label pairs found — inspect tree above and update the script")
 
     random.Random(SEED).shuffle(pairs)
     if args.limit > 0:
@@ -153,14 +129,15 @@ def main() -> None:
         img_dir.mkdir(parents=True, exist_ok=True)
         lbl_dir.mkdir(parents=True, exist_ok=True)
         for img, lbl in items:
-            label_text = remap_label(lbl, class_map)
+            label_text = remap_label(lbl)
             if not label_text.strip():
-                continue  # no labels of our classes survived the remap
+                continue
             stem = f"dw_{img.stem}"
             shutil.copy2(img, img_dir / f"{stem}{img.suffix}")
             (lbl_dir / f"{stem}.txt").write_text(label_text)
             kept += 1
-        print(f"{split}: {sum(1 for _ in (DATA_DIR / 'images' / split).iterdir())} images total")
+        total = sum(1 for _ in (DATA_DIR / "images" / split).iterdir())
+        print(f"{split}: {total} images total")
 
     print(f"\nappended {kept} drink-waste images with remapped labels")
 
