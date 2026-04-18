@@ -99,18 +99,14 @@ def main() -> None:
 
     print(f"TACO: {len(annotations['images'])} total, {len(kept_images)} with our classes, {len(kept_anns)} boxes")
 
+    # Shuffle BEFORE download so split assignment is stable across runs (even if a
+    # download is interrupted and resumed later). Otherwise images that failed once
+    # and succeeded later can silently move between splits, producing duplicates.
+    random.Random(SEED).shuffle(kept_images)
     if args.limit > 0:
-        random.Random(SEED).shuffle(kept_images)
         kept_images = kept_images[: args.limit]
-        kept_ids = {i["id"] for i in kept_images}
-        kept_anns = [a for a in kept_anns if a["image_id"] in kept_ids]
         print(f"limit={args.limit}: using {len(kept_images)} images")
 
-    kept_images = download_images(kept_images)
-    downloaded_ids = {i["id"] for i in kept_images}
-    kept_anns = [a for a in kept_anns if a["image_id"] in downloaded_ids]
-
-    random.Random(SEED).shuffle(kept_images)
     n = len(kept_images)
     n_train, n_val = int(n * TRAIN_FRAC), int(n * VAL_FRAC)
     splits = {
@@ -118,6 +114,10 @@ def main() -> None:
         "val": kept_images[n_train : n_train + n_val],
         "test": kept_images[n_train + n_val :],
     }
+
+    downloaded = download_images(kept_images)
+    downloaded_ids = {i["id"] for i in downloaded}
+    kept_anns = [a for a in kept_anns if a["image_id"] in downloaded_ids]
 
     anns_by_image: dict[int, list[dict]] = {}
     for a in kept_anns:
