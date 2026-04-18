@@ -11,3 +11,10 @@ Idea 2: Elderly Care Companion Robot
 - When the sensor detects an anomaly (fall, irregular vitals, inactivity), the robot navigates to the person to check on them.
 - The robot attempts two-way communication to confirm the person is responsive.
 - If no response or an emergency is confirmed, it automatically contacts emergency services and shares location + vitals.
+
+
+Idea 3: Emergency Response Scout Robot
+- A robot deployed into unsafe buildings (fire, structural damage, active threat) so first responders don't have to enter blind.
+- Operators see the robot's relative path and map as it moves through the building.
+- UI lets responders drop markers on the live map to flag possible survivor locations or hazards.
+- Robot investigates flagged markers to confirm whether someone is present and relays back video/audio.
