@@ -21,6 +21,12 @@ from brain.perception.types import Detection
 DEFAULT_MODEL = "google/owlv2-base-patch16"
 TARGET_MIN_SIM = 0.3
 NMS_THRESHOLD = 0.3
+# Reject detections whose bbox covers more than this fraction of the frame.
+# OWLv2 image-guided matching saturates on transparent/low-feature targets and
+# returns full-frame bboxes at confidence 1.00 — those are texture matches, not
+# real objects. Drop them so the next-best real detection surfaces, or so an
+# empty list falls through to the VLM scout in ApproachController.
+MAX_AREA_FRAC = 0.5
 
 
 def _pick_device() -> str:
@@ -95,18 +101,22 @@ class TargetFinder:
         if scores.size == 0:
             return []
 
+        frame_h, frame_w = frame.shape[:2]
+        frame_area = float(frame_h * frame_w)
         order = np.argsort(-scores)
-        return [
-            Detection(
-                class_id=0,
-                class_name="target",
-                confidence=float(scores[i]),
-                xyxy=(
-                    int(boxes[i][0]),
-                    int(boxes[i][1]),
-                    int(boxes[i][2]),
-                    int(boxes[i][3]),
-                ),
+        out: list[Detection] = []
+        for i in order:
+            x1, y1, x2, y2 = boxes[i]
+            bbox_area = max(0.0, (x2 - x1)) * max(0.0, (y2 - y1))
+            if frame_area > 0 and bbox_area / frame_area > MAX_AREA_FRAC:
+                # OWLv2 saturation — bbox covers most of the frame. Skip.
+                continue
+            out.append(
+                Detection(
+                    class_id=0,
+                    class_name="target",
+                    confidence=float(scores[i]),
+                    xyxy=(int(x1), int(y1), int(x2), int(y2)),
+                )
             )
-            for i in order
-        ]
+        return out
