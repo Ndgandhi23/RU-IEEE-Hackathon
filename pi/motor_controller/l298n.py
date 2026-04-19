@@ -20,7 +20,7 @@ stack is runnable without hardware.
 from __future__ import annotations
 
 import logging
-from typing import Protocol, runtime_checkable
+from typing import Protocol, Tuple, runtime_checkable
 
 from .config import PWM_FREQUENCY_HZ, PWM_RANGE, MotorPins
 
@@ -33,7 +33,7 @@ class MotorDriver(Protocol):
     def stop(self) -> None: ...
     def close(self) -> None: ...
     @property
-    def last_pwm(self) -> tuple[int, int]: ...
+    def last_pwm(self) -> Tuple[int, int]: ...
 
 
 class _MotorDriverBase:
@@ -42,7 +42,7 @@ class _MotorDriverBase:
         self._last_right = 0
 
     @property
-    def last_pwm(self) -> tuple[int, int]:
+    def last_pwm(self) -> Tuple[int, int]:
         return self._last_left, self._last_right
 
 

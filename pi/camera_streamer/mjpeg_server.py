@@ -29,6 +29,7 @@ import threading
 import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Dict, Optional, Set, Tuple, Type
 
 import cv2
 import numpy as np
@@ -58,7 +59,7 @@ class _FrameEncoder:
         self._q = int(jpeg_quality)
         self._lock = threading.Lock()
         self._cached_index = -1
-        self._cached_bytes: bytes | None = None
+        self._cached_bytes: Optional[bytes] = None
 
     def encode(self, frame: Frame) -> bytes:
         with self._lock:
@@ -125,7 +126,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(_INDEX_HTML)
 
-    def _wait_frame(self, after_index: int) -> Frame | None:
+    def _wait_frame(self, after_index: int) -> Optional[Frame]:
         return self.cam.wait_next(after_index=after_index, timeout_s=self.get_frame_timeout_s)
 
     def _send_single_jpeg(self) -> None:
@@ -172,7 +173,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _read_upload_bytes(self) -> tuple[bytes | None, str | None]:
+    def _read_upload_bytes(self) -> Tuple[Optional[bytes], Optional[str]]:
         content_type = self.headers.get("Content-Type", "")
         if content_type.lower().startswith("multipart/form-data"):
             try:
@@ -277,7 +278,7 @@ def _pick_handler_class(
     cam: FrameBuffer,
     encoder: _FrameEncoder,
     upload_enabled: bool,
-) -> type[_Handler]:
+) -> Type[_Handler]:
     # Subclass so each server gets its own cam/encoder bindings without
     # touching global state — makes the server safe to instantiate twice
     # in a test process.
@@ -302,8 +303,8 @@ class MjpegServer:
         self._port = port
         self._encoder = _FrameEncoder(cam, jpeg_quality=jpeg_quality)
         self._upload_enabled = upload_enabled
-        self._server: ThreadingHTTPServer | None = None
-        self._thread: threading.Thread | None = None
+        self._server: Optional[ThreadingHTTPServer] = None
+        self._thread: Optional[threading.Thread] = None
 
     def start(self) -> None:
         handler_cls = _pick_handler_class(self._cam, self._encoder, self._upload_enabled)
@@ -370,8 +371,8 @@ def _best_guess_lan_ip() -> str:
 def _extract_multipart_upload(
     body: bytes,
     content_type: str,
-    accepted_field_names: set[str],
-) -> tuple[bytes | None, str | None]:
+    accepted_field_names: Set[str],
+) -> Tuple[Optional[bytes], Optional[str]]:
     boundary = _extract_multipart_boundary(content_type)
     if boundary is None:
         return None, "missing multipart boundary"
@@ -398,7 +399,7 @@ def _extract_multipart_upload(
     return None, "missing multipart file field (expected photo, file, or frame)"
 
 
-def _extract_multipart_boundary(content_type: str) -> bytes | None:
+def _extract_multipart_boundary(content_type: str) -> Optional[bytes]:
     for chunk in content_type.split(";"):
         chunk = chunk.strip()
         if not chunk.lower().startswith("boundary="):
@@ -410,8 +411,8 @@ def _extract_multipart_boundary(content_type: str) -> bytes | None:
     return None
 
 
-def _parse_part_headers(raw: bytes) -> dict[str, str]:
-    headers: dict[str, str] = {}
+def _parse_part_headers(raw: bytes) -> Dict[str, str]:
+    headers: Dict[str, str] = {}
     for line in raw.split(b"\r\n"):
         if b":" not in line:
             continue
@@ -423,7 +424,7 @@ def _parse_part_headers(raw: bytes) -> dict[str, str]:
     return headers
 
 
-def _extract_disposition_param(disposition: str, key: str) -> str | None:
+def _extract_disposition_param(disposition: str, key: str) -> Optional[str]:
     for chunk in disposition.split(";"):
         chunk = chunk.strip()
         if "=" not in chunk:

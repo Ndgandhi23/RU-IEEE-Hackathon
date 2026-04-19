@@ -22,7 +22,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import Protocol
+from typing import List, Protocol, Tuple
 
 from .config import EncoderPins
 
@@ -37,7 +37,7 @@ log = logging.getLogger(__name__)
 # Legal quadrature transitions flip exactly one of A or B. Illegal
 # (double-flip) transitions produce 0 — we'd rather lose a count than
 # integrate garbage from a glitch.
-_TRANSITION: list[int] = [
+_TRANSITION: List[int] = [
     #   cur=00 cur=01 cur=10 cur=11
     0,   -1,    +1,     0,   # prev=00
     +1,   0,     0,    -1,   # prev=01
@@ -47,7 +47,7 @@ _TRANSITION: list[int] = [
 
 
 class EncoderReader(Protocol):
-    def read(self) -> tuple[int, int]: ...
+    def read(self) -> Tuple[int, int]: ...
     def reset(self) -> None: ...
     def close(self) -> None: ...
 
@@ -117,7 +117,7 @@ class PigpioEncoders:
         self._left = PigpioQuadrature(pi, left_pins)
         self._right = PigpioQuadrature(pi, right_pins)
 
-    def read(self) -> tuple[int, int]:
+    def read(self) -> Tuple[int, int]:
         return self._left.read(), self._right.read()
 
     def reset(self) -> None:
@@ -156,7 +156,7 @@ class MockEncoders:
         self._left += pl * self._k * dt
         self._right += pr * self._k * dt
 
-    def read(self) -> tuple[int, int]:
+    def read(self) -> Tuple[int, int]:
         with self._lock:
             self._advance_locked()
             return int(self._left), int(self._right)

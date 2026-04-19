@@ -1,13 +1,13 @@
 ultralytics==8.3.0
-torch==2.4.1
-torchvision==0.19.1
+torch>=2.5
+torchvision>=0.20
 # Qwen3-VL requires transformers >= 4.57 (not yet on PyPI as of 2026-04).
 # Install from git until the 4.57 wheel ships:
 #   pip install git+https://github.com/huggingface/transformers@main
 transformers @ git+https://github.com/huggingface/transformers@main
 # transformers (git main) treats accelerate < 1.1.0 as "not installed" for device_map.
 accelerate==1.13.0
-bitsandbytes==0.44.1
+bitsandbytes>=0.46.1
 Pillow==10.4.0
 opencv-python==4.10.0.84
 numpy==1.26.4

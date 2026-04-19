@@ -151,6 +151,17 @@ export type UseRobotNavOptions = {
    * while testing route refresh behavior.
    */
   forceNavigate?: boolean;
+  /**
+   * Demo override: when true, the loop reports `arrived=true` as soon as
+   * a task + route are present, without waiting for GPS to converge on
+   * the final waypoint. The Apple Maps route is still resolved and
+   * rendered in the UI; this only short-circuits the arrival gate so the
+   * brain-side autonomous ML loop can take over immediately.
+   *
+   * Mutually exclusive with `forceNavigate` — if both are set,
+   * `demoAutoArrive` wins.
+   */
+  demoAutoArrive?: boolean;
   /** Optional debug log sink (ring buffer grows inside the hook too). */
   onLog?: (message: string) => void;
 };
@@ -159,7 +170,8 @@ export type UseRobotNavOptions = {
 
 export function useRobotNav(options: UseRobotNavOptions): NavState {
   const { task, pose, piLink, enabled, onLog } = options;
-  const forceNavigate = options.forceNavigate ?? false;
+  const demoAutoArrive = options.demoAutoArrive ?? false;
+  const forceNavigate = !demoAutoArrive && (options.forceNavigate ?? false);
 
   // Cursor state. Kept in a ref so frequent GPS updates don't churn React.
   const waypointIndexRef = useRef(0);
@@ -272,6 +284,31 @@ export function useRobotNav(options: UseRobotNavOptions): NavState {
       );
       setDecision(next);
       maybeStopMotors(piLink, enabled, lastCommandAtRef, pushDebug);
+      return;
+    }
+
+    // DEMO: assume-already-arrived path. Keeps the Apple Maps route resolved
+    // (so the UI still shows steps / waypoints / distance remaining) but
+    // skips the whole drive-to-waypoint sequence. The brain-side autonomous
+    // ML loop takes over from here.
+    if (demoAutoArrive) {
+      waypointIndexRef.current = waypoints.length;
+      const next: NavDecision = {
+        arrived: true,
+        waypointIndex: waypoints.length,
+        stepIndex: Math.max(0, route.steps.length - 1),
+        stepInstruction: route.steps.at(-1)?.instruction ?? null,
+        target: null,
+        distanceToTargetM: 0,
+        distanceRemainingM: 0,
+        distanceRemainingSource: route.distanceMeters != null ? 'apple' : null,
+        bearingDeg: null,
+        headingErrorDeg: null,
+        command: { left: 0, right: 0, mode: 'stop' },
+        reason: 'DEMO auto-arrive — motors stopped, autonomous ML loop takes over',
+      };
+      setDecision(next);
+      maybeStopMotors(piLink, enabled, lastCommandAtRef, pushDebug, true);
       return;
     }
 
@@ -428,6 +465,7 @@ export function useRobotNav(options: UseRobotNavOptions): NavState {
     pose.headingDeg,
     enabled,
     forceNavigate,
+    demoAutoArrive,
   ]);
 
   const state: NavState = useMemo(() => {

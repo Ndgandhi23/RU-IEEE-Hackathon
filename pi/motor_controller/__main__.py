@@ -17,6 +17,7 @@ import logging
 import os
 import signal
 import sys
+from typing import Optional, Tuple
 
 from .config import (
     LEFT_ENCODER, LEFT_MOTOR, RIGHT_ENCODER, RIGHT_MOTOR,
@@ -60,7 +61,7 @@ def _connect_pigpio():
     return pi
 
 
-def _build(mock: bool) -> tuple[MotorDriver, EncoderReader, object | None]:
+def _build(mock: bool) -> Tuple[MotorDriver, EncoderReader, Optional[object]]:
     if not mock:
         pi = _connect_pigpio()
         if pi is not None:

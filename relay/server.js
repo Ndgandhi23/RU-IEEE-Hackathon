@@ -76,12 +76,18 @@ app.post('/reports', upload.single('photo'), (request, response) => {
       return;
     }
 
+    const caption =
+      typeof metadata?.caption === 'string' && metadata.caption.trim()
+        ? metadata.caption.trim()
+        : null;
+
     const report = {
       id: createReportId(),
       createdAt: new Date().toISOString(),
       photoFilename: request.file.filename,
       reporterLocation,
       status: 'pending',
+      caption,
     };
 
     reports.unshift(report);
@@ -748,6 +754,7 @@ function serializeReport(report, request) {
     photoUrl,
     reporterLocation: cloneCoordinates(report.reporterLocation),
     status: report.status,
+    caption: report.caption ?? null,
   };
 }
 

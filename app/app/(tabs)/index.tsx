@@ -17,14 +17,10 @@ import {
 } from 'react-native';
 import MapView, { Marker } from 'react-native-maps';
 import Animated, {
-  Easing,
   Extrapolation,
   interpolate,
   useAnimatedStyle,
   useSharedValue,
-  withDelay,
-  withRepeat,
-  withSequence,
   withTiming,
 } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -146,16 +142,10 @@ export default function ReporterMapScreen() {
   const perCampus = useMemo(
     () =>
       CAMPUSES.map((campus) => {
-        const realMetrics = computeMetrics(
-          reportFeed.reports.filter((report) =>
-            isLocationWithinCampus(
-              report.reporterLocation,
-              campus,
-              MAP_REPORT_BOUNDARY_MARGIN_DEGREES
-            )
-          ),
-          reportFeed.activeAssignmentId
-        );
+        const realMetrics =
+          campus.id === 'college-avenue'
+            ? computeMetrics(reportFeed.reports, reportFeed.activeAssignmentId)
+            : { total: 0, active: 0, cleaned: 0 };
         const mockMetrics = getMockMetricsForCampus(campus.id);
         return {
           campus,
@@ -300,18 +290,16 @@ export default function ReporterMapScreen() {
         showsScale
         showsUserLocation
         toolbarEnabled={false}>
-        {singletons.map((report, index) => {
+        {singletons.map((report) => {
           const isActive = report.id === reportFeed.activeAssignmentId;
           const isCleaned = report.status === 'completed';
-          const pinColor = isActive
-            ? '#B54734'
-            : isCleaned
+          const pinColor = isCleaned
             ? '#34C759'
+            : isActive
+            ? '#B54734'
             : selectedCampus.accent;
           const iconName: keyof typeof Ionicons.glyphMap = isCleaned
             ? 'checkmark'
-            : isActive
-            ? 'navigate'
             : 'trash';
           return (
             <SingletonMarker
@@ -319,8 +307,7 @@ export default function ReporterMapScreen() {
               report={report}
               color={pinColor}
               iconName={iconName}
-              pulse={isActive}
-              delay={index * 80}
+              active={isActive}
               onPress={() => showReport(report)}
             />
           );
@@ -539,27 +526,22 @@ function SingletonMarker({
   report,
   color,
   iconName,
-  pulse,
-  delay,
+  active,
   onPress,
 }: {
   report: TrashReport;
   color: string;
   iconName: keyof typeof Ionicons.glyphMap;
-  pulse: boolean;
-  delay: number;
+  active: boolean;
   onPress: () => void;
 }) {
   const [tracks, setTracks] = useState(true);
 
   useEffect(() => {
-    if (pulse) {
-      setTracks(true);
-      return;
-    }
-    const timeout = setTimeout(() => setTracks(false), 650 + delay);
+    setTracks(true);
+    const timeout = setTimeout(() => setTracks(false), 300);
     return () => clearTimeout(timeout);
-  }, [pulse, delay]);
+  }, [color, iconName, active]);
 
   return (
     <Marker
@@ -568,93 +550,20 @@ function SingletonMarker({
         longitude: report.reporterLocation.longitude,
       }}
       anchor={{ x: 0.5, y: 1 }}
-      centerOffset={{ x: 0, y: -20 }}
       tracksViewChanges={tracks}
       onPress={onPress}>
-      <AnimatedPin color={color} iconName={iconName} pulse={pulse} delay={delay} />
+      <View style={styles.pinContainer}>
+        <View
+          style={[
+            styles.pinHead,
+            { backgroundColor: color },
+            active && styles.pinHeadActive,
+          ]}>
+          <Ionicons color="#FFFFFF" name={iconName} size={18} />
+        </View>
+        <View style={[styles.pinTail, { backgroundColor: color }]} />
+      </View>
     </Marker>
-  );
-}
-
-function AnimatedPin({
-  color,
-  iconName,
-  pulse,
-  delay,
-}: {
-  color: string;
-  iconName: keyof typeof Ionicons.glyphMap;
-  pulse: boolean;
-  delay: number;
-}) {
-  const enter = useSharedValue(0);
-  const pulseProgress = useSharedValue(0);
-
-  useEffect(() => {
-    enter.value = withDelay(
-      delay,
-      withTiming(1, {
-        duration: 420,
-        easing: Easing.out(Easing.back(1.4)),
-      })
-    );
-  }, [enter, delay]);
-
-  useEffect(() => {
-    if (pulse) {
-      pulseProgress.value = withRepeat(
-        withSequence(
-          withTiming(1, { duration: 1100, easing: Easing.out(Easing.quad) }),
-          withTiming(0, { duration: 0 })
-        ),
-        -1,
-        false
-      );
-    } else {
-      pulseProgress.value = 0;
-    }
-  }, [pulse, pulseProgress]);
-
-  const headStyle = useAnimatedStyle(() => ({
-    transform: [
-      { scale: interpolate(enter.value, [0, 1], [0.2, 1], Extrapolation.CLAMP) },
-    ],
-    opacity: enter.value,
-  }));
-
-  const tailStyle = useAnimatedStyle(() => ({
-    transform: [
-      { rotate: '45deg' },
-      { scale: interpolate(enter.value, [0, 1], [0.2, 1], Extrapolation.CLAMP) },
-    ],
-    opacity: enter.value,
-  }));
-
-  const pulseStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(
-      pulseProgress.value,
-      [0, 0.4, 1],
-      [0.55, 0.25, 0],
-      Extrapolation.CLAMP
-    ),
-    transform: [
-      { scale: interpolate(pulseProgress.value, [0, 1], [0.6, 2.1]) },
-    ],
-  }));
-
-  return (
-    <View style={styles.pinContainer}>
-      {pulse ? (
-        <Animated.View
-          pointerEvents="none"
-          style={[styles.pinPulse, { backgroundColor: color }, pulseStyle]}
-        />
-      ) : null}
-      <Animated.View style={[styles.pinHead, { backgroundColor: color }, headStyle]}>
-        <Ionicons color="#FFFFFF" name={iconName} size={18} />
-      </Animated.View>
-      <Animated.View style={[styles.pinTail, { backgroundColor: color }, tailStyle]} />
-    </View>
   );
 }
 
@@ -815,14 +724,6 @@ const styles = StyleSheet.create({
     justifyContent: 'flex-start',
     width: 44,
   },
-  pinPulse: {
-    borderRadius: 22,
-    height: 44,
-    left: 0,
-    position: 'absolute',
-    top: 0,
-    width: 44,
-  },
   pinHead: {
     alignItems: 'center',
     borderColor: '#FFFFFF',
@@ -833,11 +734,16 @@ const styles = StyleSheet.create({
     width: 40,
     zIndex: 2,
   },
+  pinHeadActive: {
+    borderColor: '#FFE08A',
+    borderWidth: 4,
+  },
   pinTail: {
-    borderRadius: 3,
-    height: 14,
-    marginTop: -8,
-    width: 14,
+    borderRadius: 2,
+    height: 12,
+    marginTop: -6,
+    transform: [{ rotate: '45deg' }],
+    width: 12,
     zIndex: 1,
   },
   hotspotBadge: {

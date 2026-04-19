@@ -1,11 +1,12 @@
 import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
-  KeyboardAvoidingView,
+  Animated,
+  Keyboard,
   Platform,
   Pressable,
   ScrollView,
@@ -37,6 +38,30 @@ export default function ReportDetailsRoute() {
 
   const [caption, setCaption] = useState('');
   const [busy, setBusy] = useState(false);
+
+  const keyboardPadding = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+    const showSub = Keyboard.addListener(showEvent, (e) => {
+      Animated.timing(keyboardPadding, {
+        toValue: e.endCoordinates.height,
+        duration: e.duration ?? 220,
+        useNativeDriver: false,
+      }).start();
+    });
+    const hideSub = Keyboard.addListener(hideEvent, (e) => {
+      Animated.timing(keyboardPadding, {
+        toValue: 0,
+        duration: e.duration ?? 220,
+        useNativeDriver: false,
+      }).start();
+    });
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
+  }, [keyboardPadding]);
 
   const reporterLocation = useMemo<Coordinates | null>(() => {
     const lat = Number(params.latitude);
@@ -84,9 +109,7 @@ export default function ReportDetailsRoute() {
   }
 
   return (
-    <KeyboardAvoidingView
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      style={styles.screen}>
+    <Animated.View style={[styles.screen, { paddingBottom: keyboardPadding }]}>
       <View style={[styles.navBar, { paddingTop: insets.top + 8 }]}>
         <Pressable
           accessibilityLabel="Back to camera"
@@ -103,6 +126,7 @@ export default function ReportDetailsRoute() {
           styles.scrollContent,
           { paddingBottom: Math.max(insets.bottom + 20, 32) },
         ]}
+        keyboardDismissMode="interactive"
         keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}>
         {photoUri ? (
@@ -170,7 +194,7 @@ export default function ReportDetailsRoute() {
           )}
         </Pressable>
       </ScrollView>
-    </KeyboardAvoidingView>
+    </Animated.View>
   );
 }
 

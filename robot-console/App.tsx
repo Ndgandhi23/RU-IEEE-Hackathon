@@ -160,6 +160,9 @@ export default function App() {
   const [piWantsConnect, setPiWantsConnect] = useState(false);
   const [motorsEnabled, setMotorsEnabled] = useState(false);
   const [navForceMode, setNavForceMode] = useState(false);
+  const [demoAutoArrive, setDemoAutoArrive] = useState(
+    process.env.EXPO_PUBLIC_DEMO_AUTO_ARRIVE === '1'
+  );
   const [piTelemetry, setPiTelemetry] = useState<PiTelemetry | null>(null);
 
   // --- Logging -------------------------------------------------------------
@@ -276,6 +279,7 @@ export default function App() {
     piLink,
     enabled: motorsEnabled && piStatus === 'open',
     forceNavigate: navForceMode,
+    demoAutoArrive,
     onLog: (m) => pushLog('nav', m),
   });
 
@@ -676,6 +680,12 @@ export default function App() {
               setNavForceMode(v);
               pushSystem(`nav force-navigate ${v ? 'ON' : 'OFF'}`);
             }}
+            demoAutoArrive={demoAutoArrive}
+            onToggleDemoAutoArrive={(v) => {
+              setDemoAutoArrive(v);
+              if (v && navForceMode) setNavForceMode(false);
+              pushSystem(`DEMO auto-arrive ${v ? 'ON' : 'OFF'}`);
+            }}
             onForceRefresh={() => {
               const loc = currentLocationRef.current ?? packet.current;
               if (!loc) {
@@ -984,6 +994,8 @@ function NavTab({
   destination,
   forceNavigate,
   onToggleForceNavigate,
+  demoAutoArrive,
+  onToggleDemoAutoArrive,
   onForceRefresh,
   rawCurrent,
   onMapsLog,
@@ -996,6 +1008,8 @@ function NavTab({
   destination: LatLon | null;
   forceNavigate: boolean;
   onToggleForceNavigate: (v: boolean) => void;
+  demoAutoArrive: boolean;
+  onToggleDemoAutoArrive: (v: boolean) => void;
   onForceRefresh: () => void;
   rawCurrent: Coordinates | null;
   onMapsLog: (msg: string) => void;
@@ -1093,6 +1107,28 @@ function NavTab({
         title="Debug controls"
         subtitle="Nav-only overrides. These do not change the relay or the gate on the classifier."
       >
+        <View style={styles.switchRow}>
+          <View style={styles.switchLabels}>
+            <Text style={styles.switchLabel}>DEMO: assume already arrived</Text>
+            <Text style={styles.switchHelp}>
+              For live demos. Keeps the Apple Maps route visible but declares ARRIVED the moment a
+              task lands, so the brain's autonomous ML loop can take over without waiting for GPS
+              convergence. Motors stay stopped on the phone side — the brain drives via its own
+              WebSocket. Flipping this ON also forces Force-navigate OFF.
+            </Text>
+          </View>
+          <Switch value={demoAutoArrive} onValueChange={onToggleDemoAutoArrive} />
+        </View>
+        {demoAutoArrive ? (
+          <View style={styles.diagnosticBox}>
+            <Text style={styles.diagnosticTitle}>▶ DEMO auto-arrive is ON</Text>
+            <Text style={styles.diagnosticBody}>
+              Phone-side nav motors will not drive. Start `python -m brain.main` on the brain
+              machine so the ML loop begins autonomous search + scoop the moment a task is assigned.
+            </Text>
+          </View>
+        ) : null}
+
         <View style={styles.switchRow}>
           <View style={styles.switchLabels}>
             <Text style={styles.switchLabel}>Force navigate (ignore arrival)</Text>

@@ -16,6 +16,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
+from typing import List, Optional
 
 import cv2
 import numpy as np
@@ -36,7 +37,7 @@ class FrameBuffer:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._cond = threading.Condition(self._lock)
-        self._latest: Frame | None = None
+        self._latest: Optional[Frame] = None
         self._count = 0
 
     def push_image(self, image: np.ndarray) -> Frame:
@@ -47,7 +48,7 @@ class FrameBuffer:
             self._cond.notify_all()
         return frame
 
-    def get(self, max_age_s: float | None = None) -> Frame | None:
+    def get(self, max_age_s: Optional[float] = None) -> Optional[Frame]:
         """Most recent frame, or None if none captured yet / stale."""
         with self._lock:
             f = self._latest
@@ -57,7 +58,7 @@ class FrameBuffer:
             return None
         return f
 
-    def wait_next(self, after_index: int, timeout_s: float = 1.0) -> Frame | None:
+    def wait_next(self, after_index: int, timeout_s: float = 1.0) -> Optional[Frame]:
         """Block until a frame newer than `after_index` arrives, or timeout.
 
         Used by the MJPEG server's per-client send loop so it sleeps on the
@@ -79,7 +80,7 @@ class FrameBuffer:
 class Webcam(FrameBuffer):
     def __init__(
         self,
-        device: int | None = 0,
+        device: Optional[int] = 0,
         width: int = 640,
         height: int = 480,
         fps: int = 15,
@@ -89,9 +90,9 @@ class Webcam(FrameBuffer):
         self._width = width
         self._height = height
         self._fps = fps
-        self._cap: cv2.VideoCapture | None = None
+        self._cap: Optional[cv2.VideoCapture] = None
         self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
+        self._thread: Optional[threading.Thread] = None
 
     def start(self) -> None:
         if self._device is None:

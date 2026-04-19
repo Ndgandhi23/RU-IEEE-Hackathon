@@ -26,7 +26,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Optional, Set
 
 import websockets
 from websockets.exceptions import ConnectionClosed
@@ -123,10 +123,10 @@ async def serve(
     state: ControlState,
     host: str = WS_HOST,
     port: int = WS_PORT,
-    stop_event: asyncio.Event | None = None,
+    stop_event: Optional[asyncio.Event] = None,
 ) -> None:
     """Run forever (or until `stop_event` is set)."""
-    clients: set[Any] = set()
+    clients: Set[Any] = set()
 
     async def handler(ws) -> None:
         clients.add(ws)

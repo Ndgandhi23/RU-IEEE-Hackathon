@@ -11,4 +11,6 @@ commands, and watches the telemetry stream to know when to stop / turn.
 """
 from __future__ import annotations
 
-__all__: list[str] = []
+from typing import List
+
+__all__: List[str] = []

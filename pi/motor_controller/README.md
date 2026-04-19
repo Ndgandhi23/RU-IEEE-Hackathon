@@ -199,6 +199,24 @@ asyncio.run(demo())
 You should see `encoders.left` and `encoders.right` climbing, then holding
 steady after the `stop`.
 
+For a reusable CLI that speaks the same protocol as `robot-console`, use:
+
+```bash
+python3 -m pi.manual_drive --host <pi-ip> --telemetry
+```
+
+That opens an interactive prompt with commands like:
+
+```text
+forward 120
+left 150
+drive 80 140
+stop
+reset
+status
+quit
+```
+
 ## How the robot console uses this for Apple Maps step-by-step nav
 
 The phone-side `robot-console/nav-loop.ts` (`useRobotNav`) consumes the

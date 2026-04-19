@@ -1,21 +1,16 @@
-"""Brain-side nearby-pickup demo: Pi camera -> hybrid perception -> Pi motors.
+"""Brain-side nearby-pickup demo: Pi camera -> YOLO -> Pi motors.
 
-Scope: the minimal end-to-end loop described in HANDOFF.md Section 6. This is
-not the full state machine yet (IDLE -> PLANNING -> NAVIGATING -> ...); that
-wraps this controller and is future work. Today this script assumes the robot
-is already near the target and just needs to find, approach, scoop, and stop.
+Scope: the minimal end-to-end loop. If YOLO sees a bottle/can, approach it.
+If not, spin right in place until it does. No VLM, no reference/context
+photos — just the trained detector driving the robot.
 
-    python -m brain.main --pi-ip 192.168.1.42 \
-        --reference ref_crop.jpg --context wider.jpg
+    python -m brain.main --pi-ip 192.168.1.42
 
 Flags:
     --pi-ip HOST           IP of the Pi on the LAN. Required for robot runs.
-    --reference PATH       tight crop of the target trash item.
-    --context PATH         wider reporter photo with surroundings (for VLM scout).
     --dry-run              print PWM commands instead of sending them.
     --webcam N             use local webcam N instead of the Pi's MJPEG feed.
     --rate-hz F            target loop frequency. Default 10 Hz.
-    --no-4bit              skip Qwen3-VL 4-bit quant.
 
 On SIGINT / SIGTERM: motors are zeroed before exit.
 """
@@ -34,7 +29,6 @@ from brain.control.loop import Action, ApproachController
 from brain.io.pi_bridge import PiBridge
 from brain.io.pi_frame_source import PiFrameSource, pi_url
 from brain.io.webcam import Webcam
-from brain.perception.vlm_scout import DEFAULT_MODEL as VLM_DEFAULT, VLMScout
 from brain.perception.yolo_finder import YoloFinder
 
 log = logging.getLogger("brain.main")
@@ -47,18 +41,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=str,
         default=None,
         help="Pi IP on the LAN. Required unless --dry-run is set.",
-    )
-    ap.add_argument(
-        "--reference",
-        type=Path,
-        required=True,
-        help="tight crop of the target trash item",
-    )
-    ap.add_argument(
-        "--context",
-        type=Path,
-        required=True,
-        help="wider reporter photo with surroundings",
     )
     ap.add_argument(
         "--dry-run",
@@ -89,12 +71,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=0.5,
         help="YOLO detection confidence floor (default 0.5)",
     )
-    ap.add_argument("--vlm-model", default=VLM_DEFAULT)
-    ap.add_argument(
-        "--no-4bit",
-        action="store_true",
-        help="disable Qwen3-VL 4-bit quant",
-    )
     ap.add_argument("-v", "--verbose", action="store_true")
     return ap.parse_args(argv)
 
@@ -116,11 +92,6 @@ def _main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
-    for label, path in (("reference", args.reference), ("context", args.context)):
-        if not path.exists():
-            log.error("%s image not found: %s", label, path)
-            return 2
-
     if not args.dry_run and args.pi_ip is None:
         log.error("--pi-ip is required unless --dry-run is set")
         return 2
@@ -131,17 +102,7 @@ def _main(argv: list[str] | None = None) -> int:
     log.info("loading YOLO (%s, min_conf=%.2f)", args.yolo_weights, args.yolo_min_conf)
     finder = YoloFinder(weights=args.yolo_weights, min_conf=args.yolo_min_conf)
 
-    log.info("loading VLMScout (%s, 4bit=%s)", args.vlm_model, not args.no_4bit)
-    t0 = time.monotonic()
-    scout = VLMScout(model_name=args.vlm_model, load_in_4bit=not args.no_4bit)
-    log.info("VLM ready in %.1fs", time.monotonic() - t0)
-
-    controller = ApproachController(
-        target_finder=finder,
-        vlm_scout=scout,
-        reference_photo=str(args.reference),
-        reporter_photo=str(args.context),
-    )
+    controller = ApproachController(target_finder=finder)
 
     frame_source: Webcam | PiFrameSource
     if args.webcam is not None:

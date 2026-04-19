@@ -1,8 +1,8 @@
 """Tests for brain/control/loop.py.
 
-Mocks the target detector and VLM scout so nothing real is loaded. Covers the
-fast path (YOLO hits), the slow path (VLM scout -> burst rotation), and the
-new passive-scoop lifecycle (scoop push -> verify -> recover/retry).
+Mocks the target detector so nothing real is loaded. Covers the fast path
+(YOLO hits), the simple right-spin search when YOLO is empty, and the
+passive-scoop lifecycle (scoop push -> verify -> recover/retry).
 """
 from __future__ import annotations
 
@@ -18,7 +18,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from brain.control.loop import (
     ALIGN_TOLERANCE,
-    SEARCH_FRAMES,
     STOP_AREA_FRAC,
     Action,
     ApproachController,
@@ -44,13 +43,6 @@ def _det(cx: int, cy: int, w: int, h: int) -> Detection:
     )
 
 
-def _make_scout_result(direction: str, rationale: str = "test") -> MagicMock:
-    result = MagicMock()
-    result.direction = direction
-    result.rationale = rationale
-    return result
-
-
 @pytest.fixture
 def mock_finder() -> MagicMock:
     finder = MagicMock()
@@ -59,20 +51,8 @@ def mock_finder() -> MagicMock:
 
 
 @pytest.fixture
-def mock_scout() -> MagicMock:
-    scout = MagicMock()
-    scout.scout.return_value = _make_scout_result("left")
-    return scout
-
-
-@pytest.fixture
-def controller(mock_finder: MagicMock, mock_scout: MagicMock) -> ApproachController:
-    return ApproachController(
-        target_finder=mock_finder,
-        vlm_scout=mock_scout,
-        reference_photo="ref.jpg",
-        reporter_photo="context.jpg",
-    )
+def controller(mock_finder: MagicMock) -> ApproachController:
+    return ApproachController(target_finder=mock_finder)
 
 
 def test_centered_detection_drives_forward(controller, mock_finder) -> None:
@@ -106,58 +86,31 @@ def test_large_bbox_off_center_keeps_turning_not_scooping(controller, mock_finde
     assert controller.phase == ApproachPhase.APPROACHING
 
 
-def test_empty_detection_queries_vlm_and_starts_search(controller, mock_finder, mock_scout) -> None:
+def test_empty_detection_spins_right(controller, mock_finder) -> None:
     mock_finder.detect.return_value = []
-    mock_scout.scout.return_value = _make_scout_result("left")
-    action = controller.step(_frame())
-    assert action == Action.SEARCH_LEFT
-    assert controller.phase == ApproachPhase.SEARCHING
-    assert mock_scout.scout.call_count == 1
-
-
-def test_search_direction_matches_vlm_output(controller, mock_finder, mock_scout) -> None:
-    mock_finder.detect.return_value = []
-    mock_scout.scout.return_value = _make_scout_result("right")
     assert controller.step(_frame()) == Action.SEARCH_RIGHT
+    assert controller.phase == ApproachPhase.SEARCHING
 
 
-def test_vlm_called_at_most_once_per_search_burst(controller, mock_finder, mock_scout) -> None:
+def test_empty_detection_keeps_spinning_right(controller, mock_finder) -> None:
     mock_finder.detect.return_value = []
-    for _ in range(SEARCH_FRAMES):
-        controller.step(_frame())
-    assert mock_scout.scout.call_count == 1
+    for _ in range(20):
+        assert controller.step(_frame()) == Action.SEARCH_RIGHT
 
 
-def test_burst_exhaustion_triggers_fresh_vlm_call(controller, mock_finder, mock_scout) -> None:
+def test_detection_interrupts_search(controller, mock_finder) -> None:
     mock_finder.detect.return_value = []
-    for _ in range(SEARCH_FRAMES):
-        controller.step(_frame())
-    assert mock_scout.scout.call_count == 1
-    controller.step(_frame())
-    assert mock_scout.scout.call_count == 2
-
-
-def test_detection_during_burst_cancels_search(controller, mock_finder, mock_scout) -> None:
-    mock_finder.detect.return_value = []
-    controller.step(_frame())
-    assert mock_scout.scout.call_count == 1
+    assert controller.step(_frame()) == Action.SEARCH_RIGHT
 
     mock_finder.detect.return_value = [_det(FW // 2, FH // 2, 60, 60)]
     assert controller.step(_frame()) == Action.FORWARD
 
     mock_finder.detect.return_value = []
-    controller.step(_frame())
-    assert mock_scout.scout.call_count == 2
+    assert controller.step(_frame()) == Action.SEARCH_RIGHT
 
 
-def test_scoop_push_runs_for_configured_number_of_frames(mock_finder, mock_scout) -> None:
-    controller = ApproachController(
-        target_finder=mock_finder,
-        vlm_scout=mock_scout,
-        reference_photo="ref.jpg",
-        reporter_photo="context.jpg",
-        scoop_frames=3,
-    )
+def test_scoop_push_runs_for_configured_number_of_frames(mock_finder) -> None:
+    controller = ApproachController(target_finder=mock_finder, scoop_frames=3)
     side = int(math.sqrt(STOP_AREA_FRAC * FW * FH) * 1.1)
     mock_finder.detect.return_value = [_det(FW // 2, FH // 2, side, side)]
 
@@ -169,12 +122,9 @@ def test_scoop_push_runs_for_configured_number_of_frames(mock_finder, mock_scout
     assert controller.phase == ApproachPhase.VERIFYING
 
 
-def test_verify_success_marks_pickup_complete(mock_finder, mock_scout) -> None:
+def test_verify_success_marks_pickup_complete(mock_finder) -> None:
     controller = ApproachController(
         target_finder=mock_finder,
-        vlm_scout=mock_scout,
-        reference_photo="ref.jpg",
-        reporter_photo="context.jpg",
         scoop_frames=1,
         verify_frames=5,
         verify_clear_frames=2,
@@ -191,12 +141,9 @@ def test_verify_success_marks_pickup_complete(mock_finder, mock_scout) -> None:
     assert controller.step(_frame()) == Action.STOP
 
 
-def test_verify_failure_backs_up_then_returns_to_search(mock_finder, mock_scout) -> None:
+def test_verify_failure_backs_up_then_returns_to_search(mock_finder) -> None:
     controller = ApproachController(
         target_finder=mock_finder,
-        vlm_scout=mock_scout,
-        reference_photo="ref.jpg",
-        reporter_photo="context.jpg",
         scoop_frames=1,
         verify_frames=1,
         verify_clear_frames=2,

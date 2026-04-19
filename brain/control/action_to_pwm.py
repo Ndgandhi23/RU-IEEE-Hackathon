@@ -10,27 +10,46 @@ Sign convention matches Pi motor_controller contract:
     negative = reverse on that wheel
     range    = [-255, 255]
 
-Differential drive:
-    FORWARD       — both positive, matched magnitude → straight ahead
-    LEFT / RIGHT  — opposite signs, lower magnitude → pivot in place
-    SEARCH_*      — opposite signs, even lower magnitude → slow scan rotation
-    SCOOP_FORWARD — both positive, slower than FORWARD → controlled shove
-    BACKUP        — both negative, matched magnitude → reset after failed scoop
-    STOP          — zero
+The resulting GPIO pattern on the Pi L298N is identical to manual_control.py
+at the repo root (which uses pure GPIO.HIGH/LOW). Cross-reference:
+
+    manual forward  : IN1=H IN2=L IN3=H IN4=L  ≡  (+full, +full)  → FORWARD
+    manual backward : IN1=L IN2=H IN3=L IN4=H  ≡  (-full, -full)  → BACKUP
+    manual left     : IN1=L IN2=H IN3=H IN4=L  ≡  (-turn, +turn)  → LEFT  / SEARCH_LEFT
+    manual right    : IN1=H IN2=L IN3=L IN4=H  ≡  (+turn, -turn)  → RIGHT / SEARCH_RIGHT
+    manual stop     : all LOW                  ≡  (0, 0)          → STOP
+
+Speed levels (all in [-255, 255], single source of truth — edit here):
+    FULL   — straight-line drive authority; near manual's 100% duty cycle.
+    TURN   — in-place pivots; lower than FULL so turns don't overshoot.
+    SEARCH — slow scan rotation while looking for a target.
+    SCOOP  — controlled shove into the passive scoop; slower than FULL.
 """
 from __future__ import annotations
 
 from brain.control.loop import Action
 
+FULL_PWM   = 220   # close to manual's 100% duty, with a little headroom
+TURN_PWM   = 180   # in-place pivot magnitude
+SEARCH_PWM = 140   # slow scan rotation
+SCOOP_PWM  = 170   # controlled shove
+
+_PWM_MAX = 255
+assert all(
+    0 < level <= _PWM_MAX
+    for level in (FULL_PWM, TURN_PWM, SEARCH_PWM, SCOOP_PWM)
+), "motor PWM levels must all be within (0, 255]"
+
+
 ACTION_TO_PWM: dict[Action, tuple[int, int]] = {
-    Action.FORWARD:      (+150, +150),
-    Action.LEFT:         (-100, +100),
-    Action.RIGHT:        (+100, -100),
-    Action.STOP:         (0, 0),
-    Action.SEARCH_LEFT:  (-80,  +80),
-    Action.SEARCH_RIGHT: (+80,  -80),
-    Action.SCOOP_FORWARD: (+110, +110),
-    Action.BACKUP:       (-90, -90),
+    Action.FORWARD:       (+FULL_PWM,   +FULL_PWM),
+    Action.BACKUP:        (-FULL_PWM,   -FULL_PWM),
+    Action.LEFT:          (-TURN_PWM,   +TURN_PWM),
+    Action.RIGHT:         (+TURN_PWM,   -TURN_PWM),
+    Action.SEARCH_LEFT:   (-SEARCH_PWM, +SEARCH_PWM),
+    Action.SEARCH_RIGHT:  (+SEARCH_PWM, -SEARCH_PWM),
+    Action.SCOOP_FORWARD: (+SCOOP_PWM,  +SCOOP_PWM),
+    Action.STOP:          (0, 0),
 }
 
 

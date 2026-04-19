@@ -31,13 +31,14 @@ Hardware notes:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 
 @dataclass(frozen=True)
 class MotorPins:
     in1: int     # L298N IN (direction pin 1)
     in2: int     # L298N IN (direction pin 2)
-    enable: int | None = None  # optional ENA/ENB GPIO if not hard-wired high
+    enable: Optional[int] = None  # optional ENA/ENB GPIO if not hard-wired high
 
 
 @dataclass(frozen=True)

@@ -44,7 +44,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from brain.perception.detector import Detection, Detector  # noqa: E402
 
-from .gate import AlwaysOpenGate, Gate, ManualFileGate, RelayArrivalGate
+from .gate import AlwaysOpenGate, DemoTaskAssignedGate, Gate, ManualFileGate, RelayArrivalGate
 from .pi_stream import MjpegClient, StreamFrame
 
 
@@ -125,11 +125,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     # Gating — only stream once we've arrived at the task destination.
     ap.add_argument(
         "--gate",
-        choices=("manual", "relay", "always"),
+        choices=("manual", "relay", "always", "demo"),
         default="manual",
         help="when to consume frames. "
              "manual: open while a flag file exists (dev). "
              "relay:  poll the relay's /robot/packet and open when within arrival threshold. "
+             "demo:   poll the relay and open whenever a task is assigned (skip distance check). "
              "always: never gate (legacy — stream constantly).",
     )
     ap.add_argument("--relay-url", default="http://127.0.0.1:4000",
@@ -162,6 +163,11 @@ def _build_gate(args: argparse.Namespace) -> Gate:
         return RelayArrivalGate(
             relay_url=args.relay_url,
             arrival_threshold_m=args.arrival_threshold_m,
+            poll_interval_s=args.gate_poll_s,
+        )
+    if args.gate == "demo":
+        return DemoTaskAssignedGate(
+            relay_url=args.relay_url,
             poll_interval_s=args.gate_poll_s,
         )
     raise ValueError(f"unknown gate: {args.gate}")

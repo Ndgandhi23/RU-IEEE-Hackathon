@@ -281,6 +281,37 @@ Restart Expo after editing that file too.
 
 Do this **before** you let Apple Maps drive the robot.
 
+### Optional: Manual Drive Script
+
+If you want to talk to `pi.motor_controller` without launching Expo, use the
+manual driver script:
+
+```bash
+python3 -m pi.manual_drive --host <pi-ip> --telemetry
+```
+
+That script sends the exact same JSON commands as `robot-console`. Useful
+commands inside the prompt:
+
+```text
+forward 120
+left 150
+right 150
+drive 120 80
+stop
+reset
+status
+quit
+```
+
+You can also send one-shot commands:
+
+```bash
+python3 -m pi.manual_drive --host <pi-ip> drive 120 120 --duration 1.0
+python3 -m pi.manual_drive --host <pi-ip> stop
+python3 -m pi.manual_drive --host <pi-ip> reset
+```
+
 ### Step 1: Connect The Robot Phone To The Pi
 
 On the robot phone in `robot-console`:

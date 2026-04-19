@@ -22,12 +22,13 @@ import signal
 import sys
 import time
 from types import FrameType
+from typing import List, Optional
 
 from .mjpeg_server import MjpegServer
 from .webcam import Webcam
 
 
-def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="python -m pi.camera_streamer",
         description="Serve Pi camera frames as MJPEG, either from a USB webcam or from uploaded image files.",
@@ -55,8 +56,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
-def _install_signal_handlers(stop_flag: list[bool]) -> None:
-    def _handle(signum: int, _frame: FrameType | None) -> None:
+def _install_signal_handlers(stop_flag: List[bool]) -> None:
+    def _handle(signum: int, _frame: Optional[FrameType]) -> None:
         logging.getLogger(__name__).info("received signal %s, shutting down", signum)
         stop_flag[0] = True
 
@@ -66,7 +67,7 @@ def _install_signal_handlers(stop_flag: list[bool]) -> None:
         signal.signal(signal.SIGTERM, _handle)
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: Optional[List[str]] = None) -> int:
     args = _parse_args(argv)
 
     logging.basicConfig(

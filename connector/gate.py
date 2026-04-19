@@ -85,6 +85,81 @@ class ManualFileGate(Gate):
         return f"flag file {state}: {self._path}"
 
 
+class DemoTaskAssignedGate(Gate):
+    """Demo gate: opens as soon as the relay has an assigned task — skips the
+    haversine / Apple-Maps distance check. Intended for live demos where the
+    robot-console phone app is also flipped into 'DEMO auto-arrive' mode so
+    the whole system short-circuits to the autonomous ML pickup loop.
+
+    Same polling contract as `RelayArrivalGate`, minus the distance math.
+    """
+
+    def __init__(
+        self,
+        relay_url: str,
+        poll_interval_s: float = 1.0,
+        request_timeout_s: float = 3.0,
+    ) -> None:
+        self._base = relay_url.rstrip("/")
+        self._interval_s = poll_interval_s
+        self._timeout_s = request_timeout_s
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+        self._open = False
+        self._reason = "waiting for first poll"
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(
+            target=self._run, name="demo-task-assigned-gate", daemon=True
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+            self._thread = None
+
+    def is_open(self) -> bool:
+        with self._lock:
+            return self._open
+
+    def reason(self) -> str:
+        with self._lock:
+            return self._reason
+
+    def _set(self, is_open: bool, reason: str) -> None:
+        with self._lock:
+            changed = is_open != self._open
+            self._open = is_open
+            self._reason = reason
+        if changed:
+            log.info("gate %s: %s", "OPEN" if is_open else "CLOSED", reason)
+
+    def _run(self) -> None:
+        url = f"{self._base}/robot/packet"
+        while not self._stop.is_set():
+            try:
+                resp = requests.get(url, timeout=self._timeout_s)
+                resp.raise_for_status()
+                packet = (resp.json() or {}).get("packet") or {}
+                status = packet.get("status")
+                task_id = (packet.get("task") or {}).get("id", "?")
+                if status == "assigned":
+                    self._set(True, f"DEMO: task={task_id} assigned — gate open")
+                else:
+                    self._set(False, f"DEMO: no task (status={status!r})")
+            except requests.RequestException as e:
+                self._set(False, f"relay poll error: {e}")
+            except ValueError as e:
+                self._set(False, f"relay poll bad json: {e}")
+            self._stop.wait(self._interval_s)
+
+
 class RelayArrivalGate(Gate):
     """Opens once the robot is within `arrival_threshold_m` of the current task.
 
@@ -233,4 +308,5 @@ __all__ = [
     "AlwaysOpenGate",
     "ManualFileGate",
     "RelayArrivalGate",
+    "DemoTaskAssignedGate",
 ]

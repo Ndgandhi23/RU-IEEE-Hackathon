@@ -1,11 +1,11 @@
 """Approach-phase control loop: nearby search, visual approach, scoop, verify.
 
 Each call to ``step(frame)`` returns one discrete ``Action`` for the motor
-layer. The current demo uses the trained YOLO bottle/can detector as the fast
-path and falls back to the VLM scout only when the target is not visible.
+layer. YOLO is the only perception used: detected -> approach; empty -> spin
+right until YOLO picks up a box.
 
 State flow:
-    SEARCHING       -> VLM-guided scan bursts when YOLO is empty
+    SEARCHING       -> spin right in place until YOLO sees a target
     APPROACHING     -> steer toward the top bottle/can detection
     SCOOP_PUSH      -> short low-speed forward shove into the passive scoop
     VERIFYING       -> hold still and confirm the target disappeared
@@ -24,7 +24,6 @@ from typing import Protocol
 import numpy as np
 
 from brain.perception.types import Detection
-from brain.perception.vlm_scout import VLMScout
 
 
 class TargetDetector(Protocol):
@@ -62,7 +61,6 @@ class ApproachPhase(str, Enum):
 PICKUP_AREA_FRAC = 0.15          # fraction of frame area that triggers scoop
 ALIGN_TOLERANCE = 0.15           # |err_frac| <= this -> drive FORWARD instead of turning
 PICKUP_ALIGN_TOLERANCE = 0.10    # tighter centering gate before entering scoop
-SEARCH_FRAMES = 15               # how many rotation ticks per VLM scout call
 SCOOP_FRAMES = 8                 # short shove into the passive scoop
 VERIFY_FRAMES = 6                # dwell frames to check whether the target vanished
 VERIFY_CLEAR_FRAMES = 3          # consecutive empty frames required for success
@@ -74,26 +72,21 @@ class ApproachController:
     def __init__(
         self,
         target_finder: TargetDetector,
-        vlm_scout: VLMScout,
-        reference_photo: np.ndarray | str,
-        reporter_photo: np.ndarray | str,
+        vlm_scout: object | None = None,  # unused; kept for backwards-compat with callers
+        reference_photo: object | None = None,
+        reporter_photo: object | None = None,
         stop_area_frac: float = PICKUP_AREA_FRAC,
         align_tolerance: float = ALIGN_TOLERANCE,
         pickup_align_tolerance: float = PICKUP_ALIGN_TOLERANCE,
-        search_frames: int = SEARCH_FRAMES,
         scoop_frames: int = SCOOP_FRAMES,
         verify_frames: int = VERIFY_FRAMES,
         verify_clear_frames: int = VERIFY_CLEAR_FRAMES,
         recovery_backup_frames: int = RECOVERY_BACKUP_FRAMES,
     ) -> None:
         self.target_finder = target_finder
-        self.vlm_scout = vlm_scout
-        self.reference_photo = reference_photo
-        self.reporter_photo = reporter_photo
         self.stop_area_frac = stop_area_frac
         self.align_tolerance = align_tolerance
         self.pickup_align_tolerance = pickup_align_tolerance
-        self.search_frames = search_frames
         self.scoop_frames = scoop_frames
         self.verify_frames = verify_frames
         self.verify_clear_frames = verify_clear_frames
@@ -102,8 +95,6 @@ class ApproachController:
         self._phase = ApproachPhase.SEARCHING
         self._pickup_complete = False
 
-        self._search_remaining = 0
-        self._search_direction: str | None = None
         self._scoop_remaining = 0
         self._verify_remaining = 0
         self._verify_clear_streak = 0
@@ -164,8 +155,6 @@ class ApproachController:
 
         self._phase = ApproachPhase.RECOVERING
         self._recovery_remaining = self.recovery_backup_frames
-        self._search_remaining = 0
-        self._search_direction = None
         return self._step_recovering()
 
     def _step_recovering(self) -> Action:
@@ -177,8 +166,6 @@ class ApproachController:
         return Action.STOP
 
     def _step_approach(self, frame: np.ndarray, top: Detection) -> Action:
-        self._search_remaining = 0
-        self._search_direction = None
         self._phase = ApproachPhase.APPROACHING
 
         h, w = frame.shape[:2]
@@ -204,18 +191,4 @@ class ApproachController:
 
     def _step_search(self, frame: np.ndarray) -> Action:
         self._phase = ApproachPhase.SEARCHING
-
-        if self._search_remaining > 0:
-            self._search_remaining -= 1
-            return (
-                Action.SEARCH_LEFT if self._search_direction == "left"
-                else Action.SEARCH_RIGHT
-            )
-
-        result = self.vlm_scout.scout(frame, self.reference_photo, self.reporter_photo)
-        self._search_direction = result.direction
-        self._search_remaining = max(0, self.search_frames - 1)
-        return (
-            Action.SEARCH_LEFT if result.direction == "left"
-            else Action.SEARCH_RIGHT
-        )
+        return Action.SEARCH_RIGHT

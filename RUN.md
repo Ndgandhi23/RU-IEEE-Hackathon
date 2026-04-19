@@ -1,376 +1,468 @@
-# Running the stack (no robot hardware yet)
+# Running the stack — full live playbook
 
-This is the end-to-end test playbook while the robot chassis isn't built.
-You play "the robot" by walking around with a phone running `robot-console`.
-Your laptop hosts everything else: the relay, the trash classifier, and
-mocked Pi services. Someone (or a second phone / emulator) runs the
-reporter `app` to drop jobs into the queue.
+End-to-end playbook for the trash-pickup robot with real hardware on the Pi
+and the AI brain on the 4080 laptop.
+
+## What runs where
+
+Two machines + two phones. Nothing ambiguous.
+
+| Where | What runs | Why |
+| --- | --- | --- |
+| **Laptop** (Windows, RTX 4080) = `192.168.1.167` | `relay` (Node, :4000) • reporter app Metro (:19000ish) • robot-console Metro (:19000ish) • `brain.main` (Python, YOLO brain) • optional `demo.py` | Relay backend, Metro bundlers for both Expo apps, and the YOLO brain that talks to the Pi over Wi-Fi. |
+| **Raspberry Pi** (on the robot) = `<pi-lan-ip>` | `pi.motor_controller` (Python, WS :8765) • `pi.camera_streamer` (Python, MJPEG :8080) | Pure I/O: drives L298N H-bridge, reads encoders, streams C270 webcam. No logic. |
+| **Phone A** | Expo Go → reporter app (loaded from the laptop's Metro) | User submits trash photo + GPS. |
+| **Phone B** | Expo Go → robot-console (loaded from the laptop's Metro) | GPS + nav. Sends drive cmds to Pi during NAVIGATING. |
+
+All four devices on the **same Wi-Fi**.
+
+Two operating modes for the AI:
+
+- **Autonomous mode** — `brain.main` (on the laptop) pulls Pi MJPEG frames,
+  runs `YoloFinder` every frame. If a bottle/can is detected it approaches;
+  if not, it spins right in place until YOLO finds one. Converts chosen
+  `Action` → PWM, drives Pi motors over WebSocket. This is the real robot.
+- **Preview mode** — `demo.py` (on the laptop) opens the Pi stream, runs YOLO,
+  draws boxes. **No motor commands sent.** For sanity-checking the
+  camera → detector pipe.
 
 ```
-   phone A                         laptop                             phone B
-┌────────────┐              ┌──────────────────────┐            ┌─────────────┐
-│  app       │ POST /reports│  relay (Node, :4000) │  heartbeat │ robot-      │
-│ (reporter) │─────────────▶│                      │◀──────────▶│ console     │
-└────────────┘              │   queue + Apple Maps │  packet    │ (GPS+nav)   │
-                            │                      │            └──────┬──────┘
-                            │  pi.motor_controller │   WebSocket       │
-                            │  --mock  (:8765)     │◀──────────────────┤
-                            │                      │                   │
-                            │  pi.camera_streamer  │ MJPEG             │
-                            │  --device 0 (:8080)  │◀──┐               │
-                            │                      │   │               │
-                            │  demo.py (connector) │   │               │
-                            │  gated on arrived   ─┼───┘               │
-                            └──────────────────────┘                   │
-                                      ▲                                │
-                                      └────────── arrival gate ────────┘
+   phone A                   LAPTOP (Win, RTX 4080, .167)            phone B
+┌────────────┐          ┌─────────────────────────────────┐     ┌─────────────┐
+│  app       │ /reports │  relay   (Node,  :4000)         │ hb  │ robot-      │
+│ (reporter) │─────────▶│  queue + Apple Maps proxy       │◀───▶│ console     │
+└────────────┘          │                                 │     │ (GPS + nav) │
+                        │  brain.main  (YOLO brain)       │     └──────┬──────┘
+                        │    YoloFinder → Approach FSM    │            │
+                        │    → Action → PWM               │─── drive ──┤  SEARCHING+
+                        │                                 │            │ NAVIGATING
+                        │  demo.py  (optional preview)    │            │
+                        └───────────────▲─────────────────┘            │
+                                        │ frames                       │
+                                  MJPEG │                              │
+                                        │              drive           │
+                        ┌───────────────┴──────────┐                   │
+                        │  RASPBERRY PI (on robot) │◀──────────────────┘
+                        │   pi.camera_streamer :8080
+                        │   pi.motor_controller :8765
+                        └──────────────────────────┘
 ```
 
-All components are optional except **relay**, **app**, and **robot-console**.
-Motor controller, camera streamer, and classifier slot in one at a time as
-you verify each loop.
+Required services: **relay**, **app**, **robot-console**, **Pi motor
+controller**, **Pi camera streamer**, **brain.main**.
 
 ---
 
-## 0. Prerequisites
+## 0. Prerequisites (hardware + software)
 
-- Node 18+ (for `relay` + Expo).
-- Python 3.11 with the repo's virtualenv activated and `requirements.txt`
-  installed (`ultralytics`, `opencv-python`, `requests`, `websockets`,
-  `numpy`). `pigpio` is **not** needed on the laptop — `--mock` skips it.
-- Two iOS or Android devices running **Expo Go** (or one device + an
-  emulator / simulator on the laptop). Expo Go can only hold one project
-  at a time, so two of them is the simple path.
-- Phone(s) and laptop on the **same Wi-Fi**. Guest networks that isolate
-  clients will not work.
-- Windows Firewall must allow inbound on **4000, 8080, 8765** from the
-  private network. First run of each service will usually prompt you.
+### Hardware
+- **Any CUDA GPU (≥4 GB)** or reasonable CPU on the laptop — YOLOv8n is
+  the only model `brain.main` loads and it runs fine on CPU if needed.
+- **Raspberry Pi 3B+** with:
+  - L298N H-bridge wired to the two NeveRest motors (pins in
+    `pi/motor_controller/README.md`).
+  - Logitech C270 webcam on USB.
+  - `pigpio` installed and `pigpiod` running.
+- **Two phones** with **Expo Go** installed. Reporter phone = phone A,
+  robot-console phone = phone B (mounted on the robot).
+- Laptop (running relay) + brain desktop + Pi + both phones all on the
+  **same Wi-Fi**. Guest networks that isolate clients don't work.
+- Windows Firewall on the laptop must allow inbound **4000, 8080, 8765,
+  8000** from the private network.
 
-Pick **one LAN IP** for the laptop that runs the relay (and, for bring-up,
-the mocked Pi + camera). Below it is **`192.168.1.167`** — replace it everywhere
-if `ipconfig` shows something else (`RUN.md` commands, both `.env` files,
-`demo.py --url` / `--relay-url`).
+Pick **one LAN IP** for the machine running the relay. Below it is
+**`192.168.1.167`** — replace everywhere if `ipconfig` shows something else.
+The repo's `.env` files are already set to this IP.
+
+### Software install (one time on the brain desktop)
+
+```powershell
+cd "C:\Users\loorj\Documents\RIEEE Hackathon"
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+**CUDA torch.** `requirements.txt` pins `torch>=2.5`; if pip pulls a CPU-only
+wheel or a wheel that doesn't have `nn.Module.set_submodule`, force the CUDA
+build (pick the index matching your driver — `nvidia-smi` top-right shows
+the CUDA version):
+
+```powershell
+pip install -U "torch>=2.5" "torchvision>=0.20" --index-url https://download.pytorch.org/whl/cu124
+# use cu121 instead of cu124 if your driver is older
+```
 
 ---
 
-## 1. One-time configuration
+## 1. First-time setup
 
-### Robot console (`robot-console/.env`)
+### 1a. YOLO weights
 
-Copy `robot-console/.env.example` → `robot-console/.env` and set **only**:
+`models/trash_v1.pt` is already in the repo (~6 MB). That's the only model
+`brain.main` loads. No HuggingFace downloads, no 17 GB caches. Smoke test
+with:
 
-```
-EXPO_PUBLIC_API_BASE_URL=http://192.168.1.167:4000
-```
-
-The console **automatically** uses **`ws://192.168.1.167:8765`** for the Pi
-tab — same hostname as the relay, port **8765**. That matches running the
-motor mock on the same laptop as Terminal 1 + 4 (see §2).
-
-**Optional:** set `EXPO_PUBLIC_PI_WS_URL` only if the real Raspberry Pi (motor
-controller) is **not** on the same machine as the relay, e.g.
-`ws://192.168.1.50:8765`.
-
-After any change, **restart** `npx expo start`. On **Logs** you should see:
-
-`boot: relay=http://… piWs=ws://… (derived from relay host)` — or no “derived”
-line if you set `EXPO_PUBLIC_PI_WS_URL` yourself.
-
-If `relay=(unset)`, `EXPO_PUBLIC_API_BASE_URL` was missing or the env file was
-not picked up.
-
-### Reporter app (`app/.env`)
-
-```
-EXPO_PUBLIC_API_BASE_URL=http://192.168.1.167:4000
+```powershell
+python tools/live_detect.py --weights models/trash_v1.pt
 ```
 
-Same host and port **4000** as `robot-console` — both apps talk only to the relay.
+If bottles / cans in front of your webcam light up with boxes, you're good.
 
-Restart Expo after edits.
+### 1b. Relay credentials (`relay/.env`)
 
-### Same IP everywhere (reference)
-
-| What | Value |
-| ---- | ----- |
-| Relay HTTP | `http://<laptop-ip>:4000` |
-| Robot console | `EXPO_PUBLIC_API_BASE_URL` = that URL |
-| Reporter app | same `EXPO_PUBLIC_API_BASE_URL` |
-| Pi WebSocket (default) | `ws://<laptop-ip>:8765` — **no env line needed** |
-| MJPEG stream (camera mock) | `http://<laptop-ip>:8080/stream.mjpg` |
-| Classifier `--relay-url` | same as relay HTTP base |
-| Classifier `--url` (MJPEG) | `http://<laptop-ip>:8080/stream.mjpg` |
-
----
-
-## 1b. What to do to test (minimal path)
-
-1. Set **`robot-console/.env`** and **`app/.env`** to your laptop IP (§1).
-2. Start **Terminal 1** (relay), **Terminal 3** (robot-console), **Terminal 2** (reporter app).
-3. On **phone B** (robot console): GPS tab → start tracking; Task tab should show relay traffic.
-4. On **phone A**: submit a report → phone B gets a task and Nav updates.
-5. **Optional — Pi WebSocket:** start **Terminal 4** (motor mock). On phone B → **Pi** tab → **Connect**. You should see `ws://<your-ip>:8765` under Pi URL (derived). Toggle motors only when ready.
-6. **Optional — camera + classifier:** Terminals 5–6 as in §2.
-
----
-
-## 2. Commands — one terminal per service
-
-Open each in a fresh PowerShell window. Keep them all running for the
-duration of a test session.
-
-### Terminal 1 — Relay (required)
+Copy the example and fill in Apple Maps auth. The repo already includes
+`relay/AuthKey_H2C3BVC6A9.p8`.
 
 ```powershell
 cd relay
-npm install           # first time only
+Copy-Item .env.example .env
+```
+
+Edit `relay/.env`:
+
+```
+PORT=4000
+PUBLIC_BASE_URL=http://192.168.1.167:4000
+APPLE_MAPS_TEAM_ID=<your 10-char Apple developer team id>
+APPLE_MAPS_KEY_ID=H2C3BVC6A9
+APPLE_MAPS_PRIVATE_KEY_PATH=./AuthKey_H2C3BVC6A9.p8
+APPLE_MAPS_TOKEN_ORIGIN=http://192.168.1.167:4000
+```
+
+Without Apple Maps auth `/routes/apple` returns 503 and the robot console's
+Nav tab won't populate — reports still queue, but routing doesn't work.
+
+Verify later with: `curl http://192.168.1.167:4000/health` → should show
+`apple_maps: ok`.
+
+### 1c. App env files (already configured)
+
+Both `app/.env` and `robot-console/.env` already point at
+`http://192.168.1.167:4000`. If the laptop IP changes (different router /
+hotspot), edit both to the new IP and restart `npx expo start`.
+
+`robot-console` derives the Pi WebSocket as `ws://<relay-host>:8765`. Since
+the Pi is **not** on the laptop in a live run, set this explicitly:
+
+```
+# robot-console/.env (add this line with the Pi's LAN IP)
+EXPO_PUBLIC_PI_WS_URL=ws://<pi-lan-ip>:8765
+```
+
+### 1d. Node deps (one time, per machine)
+
+```powershell
+cd relay; npm install
+cd ..\app; npm install
+cd ..\robot-console; npm install
+```
+
+### 1e. Ship the code to the Pi
+
+The Pi only needs the `pi/` package — not `brain/`, `relay/`, `app/`, or the
+model weights. Two ways to get it there:
+
+**Option A — git clone on the Pi (easiest if the Pi has internet):**
+
+```bash
+# On the Pi (SSH in first)
+ssh pi@<pi-lan-ip>
+sudo apt-get update
+sudo apt-get install -y python3-pip python3-opencv pigpio git
+sudo systemctl enable --now pigpiod
+git clone <this-repo-url> ~/RIEEE-Hackathon
+cd ~/RIEEE-Hackathon
+python3 -m pip install -r pi/motor_controller/requirements.txt
+python3 -m pip install -r pi/camera_streamer/requirements.txt
+```
+
+**Option B — scp from the laptop (if the Pi has no internet / you're
+iterating on local edits):**
+
+From PowerShell on the laptop, in the repo root:
+
+```powershell
+# one-time: install apt packages on the Pi
+ssh pi@<pi-lan-ip> "sudo apt-get update && sudo apt-get install -y python3-pip python3-opencv pigpio && sudo systemctl enable --now pigpiod"
+
+# copy just the pi/ folder to the Pi
+scp -r pi pi@<pi-lan-ip>:~/RIEEE-Hackathon/
+
+# install python deps on the Pi
+ssh pi@<pi-lan-ip> "cd ~/RIEEE-Hackathon && python3 -m pip install -r pi/motor_controller/requirements.txt && python3 -m pip install -r pi/camera_streamer/requirements.txt"
+```
+
+**Re-syncing after laptop-side edits to `pi/`:**
+
+```powershell
+# fastest: re-scp only the changed subpackage
+scp -r pi/motor_controller pi@<pi-lan-ip>:~/RIEEE-Hackathon/pi/
+# or the camera streamer
+scp -r pi/camera_streamer  pi@<pi-lan-ip>:~/RIEEE-Hackathon/pi/
+```
+
+Then restart the affected terminal on the Pi (Ctrl-C + relaunch).
+
+Note the Pi's LAN IP (`hostname -I | awk '{print $1}'` on the Pi) — you'll
+use it as `<pi-lan-ip>` in every command below and in
+`robot-console/.env` (§1c).
+
+---
+
+## 2. Live run — terminals in order
+
+Six terminals total: **four on the laptop**, **two on the Pi (via SSH)**.
+Every heading below is tagged `[LAPTOP]` or `[PI]` — don't mix them up.
+
+### Terminal 1 `[LAPTOP]` — Relay
+
+```powershell
+cd relay
 npm start
 ```
 
-Look for `campus-cleanup-relay listening on :4000`. This is the source of
-truth for the queue, Apple Maps routes, and robot assignment.
+Expect `campus-cleanup-relay listening on :4000`. Smoke check:
 
-### Terminal 2 — Reporter app (required, phone A)
+```powershell
+curl http://192.168.1.167:4000/health
+```
+
+### Terminal 2 `[LAPTOP]` — Reporter app Metro (serves phone A)
 
 ```powershell
 cd app
-npm install           # first time only
 npx expo start
 ```
 
-Scan the QR with Expo Go on **phone A**. This phone submits reports. If
-the QR doesn't work over LAN, add `--tunnel`.
+Scan the QR with Expo Go on **phone A**. Phone A loads the bundle from the
+laptop's Metro and talks only to the relay at `192.168.1.167:4000`.
 
-### Terminal 3 — Robot console (required, phone B)
+### Terminal 3 `[LAPTOP]` — Robot console Metro (serves phone B)
 
 ```powershell
 cd robot-console
-npm install           # first time only
 npx expo start
 ```
 
-Scan the QR with Expo Go on **phone B**. This is the one you treat as
-"the robot" — walk around with it.
+Scan the QR with Expo Go on **phone B**. Mount on the robot. Phone B
+talks to:
+- Relay at `192.168.1.167:4000` (heartbeats, task assignment, routes).
+- **Pi motor WS at `ws://<pi-lan-ip>:8765`** — the one set in
+  `robot-console/.env` as `EXPO_PUBLIC_PI_WS_URL`. This is how phone B
+  sends drive commands directly to the Pi during NAVIGATING.
 
-### Terminal 4 — Fake Pi motor controller (optional)
+### Terminal 4 `[PI]` — Motor controller (drives the robot)
 
-```powershell
-python -m pi.motor_controller --mock --host 0.0.0.0 -v
+SSH from the laptop to the Pi:
+
+```bash
+ssh pi@<pi-lan-ip>
+cd ~/RIEEE-Hackathon
+python3 -m pi.motor_controller --host 0.0.0.0 -v
 ```
 
-`--mock` means no pigpio / GPIO dependency; encoder counts are simulated
-from commanded PWM. Listens on `ws://0.0.0.0:8765`. Keeps the robot
-console's **Pi** tab honest: open/close the socket, watch telemetry,
-flip motors on and see the mock encoders move.
+Listens on `ws://0.0.0.0:8765`. Accepts `drive` / `stop` / `reset_encoders`
+from any client. Broadcasts `{type:"state", encoders, motors, watchdog_ok}`
+at 20 Hz. Motors auto-zero after 500 ms of silence (watchdog).
 
-### Terminal 5 — Fake Pi camera streamer (optional)
+**This is the port the laptop talks to for motor control**, from two
+different clients:
+1. Robot console (phone B) while NAVIGATING.
+2. `brain.main` (laptop) while SEARCHING / APPROACHING / VERIFYING.
 
-```powershell
-python -m pi.camera_streamer --device 0 --host 0.0.0.0 -v
+Keep the Pi on a UPS / wall-wart during bring-up, not the Ryobi
+battery — a brownout restarts the controller.
+
+### Terminal 5 `[PI]` — Camera streamer (feeds frames to the laptop)
+
+Second SSH session to the Pi:
+
+```bash
+ssh pi@<pi-lan-ip>
+cd ~/RIEEE-Hackathon
+python3 -m pi.camera_streamer --host 0.0.0.0 -v
 ```
 
-Uses your laptop webcam as a stand-in for the Pi's C270. Serves MJPEG at
-`http://192.168.1.167:8080/stream.mjpg`. The `/healthz` endpoint gives
-you a quick smoke test in a browser.
+Serves MJPEG at `http://<pi-lan-ip>:8080/stream.mjpg`. Browser test:
+paste that URL in a laptop browser, confirm live video.
 
-### Terminal 6 — Classifier, gated on arrival (optional)
+`brain.main` on the laptop opens this URL automatically when you pass
+`--pi-ip <pi-lan-ip>` (§Terminal 6).
+
+### Terminal 6 `[LAPTOP]` — Brain (AI, sends control to the Pi)
+
+This is the loop that closes camera → YOLO → motors: it GETs MJPEG frames
+from the Pi, runs YOLO every frame, and **sends `drive` JSON messages back
+to the Pi's WS at :8765**. Same WebSocket endpoint Terminal 4 is
+serving; same protocol phone B uses during NAVIGATING.
+
+Behavior:
+- YOLO sees a bottle/can → approach it (turn toward it if off-center,
+  forward when centered, scoop when the bbox fills the frame).
+- YOLO sees nothing → spin right in place until it does.
+
+**Dry-run first** — computes PWM but does NOT send to the Pi. Confirm
+the per-frame log looks sane before letting it drive.
 
 ```powershell
-python demo.py --url http://192.168.1.167:8080/stream.mjpg --gate relay --relay-url http://192.168.1.167:4000
+.\.venv\Scripts\Activate.ps1
+python -m brain.main ^
+    --pi-ip <pi-lan-ip> ^
+    --rate-hz 10 ^
+    --dry-run -v
 ```
 
-- Uses `models/trash_v1.pt` via `brain.perception.detector` — **that is
-  your trash detector.**
-- The preview window is on by default. Add `--no-display` for
-  headless runs.
-- `--gate relay` polls `/robot/packet` and only opens the MJPEG stream
-  once the robot is within arrival radius of its destination (default
-  **10 m**, tune with `--arrival-threshold-m`). Until then it displays
-  an idle placeholder. 10 m is a "we're in the area, start looking"
-  threshold — it accounts for consumer phone GPS accuracy of 5-8 m.
-- For ungated smoke tests: `--gate always` (streams immediately).
-- For manual dev: `--gate manual --manual-gate-file arrived.flag` and
-  create `arrived.flag` when you want it to start.
+Expect per-frame log lines like:
+
+```
+frame=47 phase=searching action=SEARCH_RIGHT pwm=(+80,-80)  [dry-run]
+frame=48 phase=approaching action=FORWARD     pwm=(+150,+150)
+```
+
+**Live run** — drop `--dry-run`. The brain now opens `ws://<pi-lan-ip>:8765`
+and streams `{"cmd":"drive","left":<pwm>,"right":<pwm>}` every loop tick
+(10 Hz) until shutdown, at which point it sends `{"cmd":"stop"}` and
+closes cleanly.
+
+```powershell
+python -m brain.main --pi-ip <pi-lan-ip> --rate-hz 10 -v
+```
+
+Flags:
+- `--pi-ip` — Pi's LAN IP (not the laptop's).
+- `--yolo-weights` — default `models/trash_v1.pt`, present in repo.
+- `--yolo-min-conf` — detection confidence floor, default 0.5.
+- `--rate-hz` — control loop frequency, default 10.
+- `--webcam N` — bypass the Pi MJPEG; pull frames from local webcam N
+  (dress-rehearsal only).
+- `--dry-run` — compute but don't send PWM.
+- `-v` — DEBUG logging.
+
+### Terminal 7 (optional) — Preview / classifier
+
+**Not** the AI brain. YOLO-only visualization of the Pi stream.
+
+```powershell
+python demo.py ^
+    --url http://<pi-lan-ip>:8080/stream.mjpg ^
+    --gate relay ^
+    --relay-url http://192.168.1.167:4000
+```
+
+- `--gate relay` — poll the relay and open the stream only when the robot
+  is inside arrival radius (default 10 m, tune with `--arrival-threshold-m`).
+- `--gate always` — always stream (pure smoke test).
+- `--gate manual --manual-gate-file arrived.flag` — open while flag exists.
+- `--no-display` — headless.
+
+Run this while **`brain.main` is running** to watch what the brain sees.
+`demo.py` never sends motor commands, so it won't fight the brain on the WS.
+
+### Optional — Manual motor REPL
+
+```powershell
+python -m pi.manual_drive --host <pi-lan-ip> --telemetry
+```
+
+Interactive `drive / forward / back / left / right / stop / reset / status`
+REPL. Useful for bench-testing the motors before connecting the brain.
 
 ---
 
 ## 3. Happy-path test flow
 
-1. **Start Terminals 1, 2, 3.** In relay's console you should see one
-   heartbeat come through as soon as phone B boots the console.
+1. **Terminals 1–3** up on the laptop. Phone B's console boots; relay log
+   shows one heartbeat.
+2. **Terminals 4–5** up on the Pi. Browser-test the MJPEG URL; Pi tab on
+   phone B → **Connect** → status flips `connecting → open`, `Watchdog: OK`.
+3. **Terminal 6** (`brain.main`) up in **dry-run**. Watch the log — it
+   should step through phases without moving motors.
+4. **Phone A** submits a trash report (photo + current location). Relay
+   logs `[reports] created …` + `[assignment] assigned task …`.
+5. **Phone B → Task tab**: `Status: assigned`, target lat/lon populated,
+   Nav tab shows waypoints + distance.
+6. Walk phone B toward the report. Waypoint counter advances; within ~10 m
+   of the destination, Nav flips `Arrived: YES — search phase`.
+7. **Re-launch `brain.main` without `--dry-run`** (Ctrl-C the dry-run and
+   relaunch, this time with the `--reference` / `--context` cropped from
+   the reporter's actual photo). The brain takes over the Pi's WS:
+   SEARCHING → APPROACHING → SCOOP_PUSH → VERIFYING, then exits on
+   `pickup_complete`.
+8. **Phone B → Task tab → "Complete current task"**. Relay assigns the
+   next pending report, or returns to idle.
 
-2. **Phone B → GPS tab → "Start auto mode."** Accept location + compass
-   permissions. Coords populate, heading ticks, top strip shows
-   `gps on`. GPS log fills with `tracking: …` entries.
-
-3. **Phone B → Task tab.** `Status: idle`, `Pending reports: 0`. The
-   **relay I/O log** panel ticks every ~8 s with `idle-ping` round
-   trips. That's the assignment poller.
-
-4. **Phone A → reporter app.** Submit a real report (photo + current
-   location). In Terminal 1 you see `[reports] created …` and
-   `[assignment] assigned task …`.
-
-5. **Phone B → Task tab** updates within one heartbeat:
-   - `Status: assigned`
-   - Active task id
-   - Target lat/lon, route distance, ETA, waypoint + step count
-   - Top strip pill reads `task <abcdef>`
-
-   Switch to the **Nav tab**: Step `1/N`, the Apple Maps turn
-   instruction, distance to next waypoint, bearing, heading error, and
-   the proposed motor command. Until you enable motors this is a
-   dry-run — the commands are computed but nothing ships to the Pi.
-
-6. **Walk phone B toward the report.** Every couple of seconds you'll
-   see `gps-watch` entries in the relay log. That's the console pushing
-   fresh GPS so the relay reshoots Apple Maps from where you *are*, not
-   where you started — overshoots self-correct as the route updates.
-   The waypoint counter advances as you pass each one.
-
-7. **Arrival.** Once you're within ~10 m of the destination the **Nav
-   tab** flips `Arrived: YES — search phase` and the top strip lights
-   up `ARRIVED`. If Terminal 6 is running, `demo.py` opens its preview
-   and starts running the trash detector on the MJPEG stream.
-
-   **Short-route note:** if the reported location is only 30-70 m away,
-   Apple Maps will typically return a route with zero turn-by-turn
-   steps (because there are no turns — "walk straight"). The Nav tab
-   shows `Route source: straight-line fallback (no Apple steps)` and
-   navigates directly toward the report GPS. This is expected, not a
-   bug; it only matters that Apple's total distance + ETA come back.
-
-8. **Phone B → Task tab → "Complete current task."** The relay assigns
-   the next pending report immediately; otherwise status returns to
-   idle, `ARRIVED` goes away, the idle-ping loop resumes.
+For bench tests, steps 4–6 are optional — `brain.main` runs against
+whatever it sees from the webcam / Pi stream.
 
 ---
 
-## 4. Pi WebSocket link — configure and test
+## 4. Pi WebSocket — who's driving when
 
-The robot console does **not** auto-connect to the Pi. It computes the Pi
-WebSocket URL as **`ws://<relay-host>:8765`** unless you override with
-`EXPO_PUBLIC_PI_WS_URL` in `.env`. Toggle **Connect** on the **Pi** tab when
-you want a socket.
+Two clients share `:8765`:
+- **Robot console (phone B)** — drives during NAVIGATING (walking Apple
+  Maps waypoints).
+- **Brain (`brain.main`)** — drives during SEARCHING and later phases.
 
-### 4a. End-to-end checklist
+The Pi's watchdog arbitrates: whoever sent `drive` most recently wins for
+the next 500 ms. Today the handoff is implicit — phone stops sending when
+its waypoint chain ends; brain starts sending when you launch it after
+`ARRIVED`. Explicit signaling over `iphone_listener` is future work.
 
-1. **Set the URL** (section 1). Start Terminal 4 (mock) or the Pi service
-   before connecting; use the Pi tab status line to confirm the socket.
-2. **Restart Expo** after editing `.env`.
-3. Open **Logs** on the console and confirm `boot: … piWs=ws://…` (not
-   `(unset)`).
-4. **Pi tab → Connect ON.** Status should go `connecting → open`. If it
-   sticks on `connecting` or `error`, see §6 (firewall, wrong IP, service not
-   listening).
-5. **Leave motors OFF** until you understand what the Nav tab will send.
-   With **Enable motors** off, the nav loop still computes PWM and shows
-   them in **Nav → Proposed motor command**, but nothing is sent — safe for
-   walking tests.
-6. **After arrival** (`Nav → Arrived: YES`), the nav loop normally stops
-   sending drive commands (motors would idle). To **test the WebSocket +
-   mock encoders after you've arrived**, either:
-   - use **Nav → Debug controls → Force navigate (ignore arrival)** so the
-     loop keeps issuing commands; or
-   - disconnect/reconnect the Pi tab, or use **Send STOP** between trials.
-
-### 4b. What "arrived" means for the Pi link
-
-- **Relay / classifier**: "arrived" is distance-based (Apple + thresholds).
-- **Pi WebSocket**: independent. The socket stays open; telemetry keeps
-  flowing. Only **motor commands** stop when the nav loop declares arrival,
-  unless you enable force-navigate or re-assign a new task.
-
-### 4c. Laptop mock (Terminal 4)
-
-```powershell
-python -m pi.motor_controller --mock --host 0.0.0.0 -v
-```
-
-No extra env line needed if the mock runs on the **same machine** as the relay
-(the Pi URL is derived from `EXPO_PUBLIC_API_BASE_URL`).
-
-On phone B's **Pi tab**:
-
-1. Tap **Connect**. Socket goes `connecting → open`. Pi log prints
-   `status -> open`. Telemetry panel populates within ~50 ms
-   (zeros for encoders and PWM, `Watchdog: OK`).
-2. Flip **Enable motors** on. Top strip: `motors LIVE`. The nav loop
-   now actually sends drive commands. The mocked encoders drift based
-   on commanded PWM, so both the **Nav** `PWM` row and the **Pi**
-   `Motor PWM` row should match.
-3. Tap **Send STOP**, or flip motors off — both PWMs snap to 0 and the
-   mock encoders stop accumulating.
-4. Disconnect the socket entirely. Within 500 ms the **Pi tab** reports
-   `Watchdog: TRIPPED (motors halted)`. That's the Pi-side safety net
-   confirming it halts motors on its own if commands stop flowing.
-
-### 4d. Real Pi (when the chassis exists)
-
-On the Pi (Linux), from the repo root, with pigpio / GPIO configured per
-`pi/motor_controller/README.md`:
-
-```bash
-python -m pi.motor_controller --host 0.0.0.0 -v
-```
-
-Set **`EXPO_PUBLIC_PI_WS_URL=ws://<pi-LAN-ip>:8765`** in `robot-console/.env`
-(the relay may still live on the laptop — override only the Pi host). The
-phone must be on the same subnet as the Pi; do not use `localhost` (that
-refers to the phone itself).
+**Safety:**
+- Leave phone B's **Enable motors** off until you've seen the proposed
+  PWM on the Nav tab look sane.
+- Launch `brain.main` with `--dry-run` first, confirm phase/action/PWM
+  pattern, then relaunch without `--dry-run`.
+- Watchdog halts motors 500 ms after the last `drive`. Any brain/phone
+  crash or Wi-Fi hiccup stops the robot automatically.
 
 ---
 
-## 5. Forcing the classifier on (without walking anywhere)
+## 5. Troubleshooting
 
-Useful when you want to smoke-test the MJPEG → YOLO pipe on its own.
+| Symptom | Fix |
+| --- | --- |
+| `brain.main`: `ModuleNotFoundError: ultralytics` (or any other dep) | venv not activated, or `pip install -r requirements.txt` not done. |
+| `brain.main`: frames stale / timeout | MJPEG server down, wrong `--pi-ip`, Wi-Fi saturated. Open `http://<pi-lan-ip>:8080/stream.mjpg` in a browser. |
+| `brain.main`: motors don't move | Still in `--dry-run`? Watchdog tripped (no recent `drive`)? Wrong `--pi-ip`? Pi WS not running? |
+| `brain.main`: spins right forever | YOLO isn't seeing a bottle/can. Drop `--yolo-min-conf 0.3` or test with `tools/live_detect.py`. |
+| Robot console: red `no relay` pill | `.env` not loaded. Stop + restart `npx expo start`. |
+| Task tab `✖ heartbeat` errors | Firewall blocking 4000, or laptop IP changed. Check `ipconfig` and both `.env` files. |
+| Task never assigned after reporter submit | Relay log should show `[apple-maps] …`. If it errors, Apple Maps creds in `relay/.env` are wrong — curl `/health` to check. |
+| Pi tab stuck on `connecting` | Terminal 4 not running, firewall blocks 8765, or `EXPO_PUBLIC_PI_WS_URL` points at the wrong host. |
+| `Pi URL: unset` on Pi tab | `EXPO_PUBLIC_API_BASE_URL` missing — fix `robot-console/.env`, restart Expo. |
+| `demo.py` preview never opens | Gate is closed. Try `--gate always` to isolate. |
+| Phone B's GPS log stops mid-run | Phone locked & throttled the watcher — keep screen awake. |
+| `cache-system uses symlinks` warning on Windows | Harmless. Enable Developer Mode to silence. |
 
-```powershell
-python demo.py --url http://192.168.1.167:8080/stream.mjpg --gate always
-```
-
-Or leave it running in `manual` mode and toggle it with a file:
-
-```powershell
-python demo.py --url http://192.168.1.167:8080/stream.mjpg --gate manual --manual-gate-file arrived.flag
-# In another shell:
-New-Item arrived.flag -ItemType File   # opens the gate
-Remove-Item arrived.flag               # closes it again
-```
-
----
-
-## 6. Troubleshooting cheatsheet
-
-| Symptom                                         | Likely cause / fix                                                                 |
-| ----------------------------------------------- | ---------------------------------------------------------------------------------- |
-| Robot console: red `no relay` pill              | `.env` not loaded. Save, **stop** `npx expo start`, start it again.                |
-| Task tab relay log shows `✖ heartbeat` errors   | Firewall blocking 4000, or laptop IP changed. Re-check `ipconfig` and `.env`.      |
-| Task never gets assigned after submitting       | Terminal 1 logs should show `[apple-maps] …`. If it errors, MapKit token config.   |
-| Pi tab won't leave `connecting`                 | Terminal 4 / Pi not running. Firewall on **8765**. Wrong relay IP → derived Pi URL points at the wrong host. Or set `EXPO_PUBLIC_PI_WS_URL` explicitly. |
-| `Pi URL: unset` on Pi tab                       | `EXPO_PUBLIC_API_BASE_URL` missing / invalid — fix `.env` and restart Expo (Pi URL is derived from the relay host). |
-| `motors LIVE` but PWM stays 0                   | Nav tab says why in "Reason" — usually no compass, or already arrived.             |
-| `demo.py` never opens a preview window          | Gate is closed. Inspect connector log; or run with `--gate always` to verify deps. |
-| `ModuleNotFoundError: ultralytics`              | Activate the venv and `pip install -r requirements.txt`.                           |
-| Phone B's GPS log stops mid-run                 | Phone locked the screen and throttled the watcher — keep it awake.                 |
-
-When things get weird, the best first move is the **Logs tab** on the
-robot console. Every stream (gps / relay / pi / nav / system) is
-interleaved by timestamp there and color-coded. Clear it, reproduce the
-bug, screenshot.
+First debug move when anything feels off: the **Logs tab** on the robot
+console. Every stream (gps / relay / pi / nav / system) is interleaved by
+timestamp and color-coded there. Clear, reproduce, screenshot.
 
 ---
 
-## 7. Quick reference
+## 6. Quick reference
 
-| Service              | Where                | Port    | Required | Start                                                      |
-| -------------------- | -------------------- | ------- | -------- | ---------------------------------------------------------- |
-| Relay                | laptop               | 4000    | yes      | `cd relay && npm start`                                    |
-| Reporter app         | laptop → phone A     | Metro   | yes      | `cd app && npx expo start`                                 |
-| Robot console        | laptop → phone B     | Metro   | yes      | `cd robot-console && npx expo start`                       |
-| Pi motor (mock)      | laptop               | 8765    | no       | `python -m pi.motor_controller --mock --host 0.0.0.0 -v`   |
-| Pi camera (laptop)   | laptop               | 8080    | no       | `python -m pi.camera_streamer --device 0 --host 0.0.0.0`   |
-| Classifier           | laptop               | display | no       | `python demo.py --url http://.../stream.mjpg --gate relay --relay-url http://192.168.1.167:4000`           |
+| Service | Host | Port | Required | Start |
+| --- | --- | --- | --- | --- |
+| Relay | **LAPTOP** | 4000 | yes | `cd relay && npm start` |
+| Reporter app Metro | **LAPTOP** → phone A | Metro | yes | `cd app && npx expo start` |
+| Robot console Metro | **LAPTOP** → phone B | Metro | yes | `cd robot-console && npx expo start` |
+| Pi motor controller | **PI** | 8765 | yes | `python3 -m pi.motor_controller --host 0.0.0.0 -v` |
+| Pi camera streamer | **PI** | 8080 | yes | `python3 -m pi.camera_streamer --host 0.0.0.0 -v` |
+| **Brain (YOLO, sends control → Pi)** | **LAPTOP** | — | yes | `python -m brain.main --pi-ip <pi-lan-ip> -v` |
+| Preview classifier | **LAPTOP** | display | no | `python demo.py --url http://<pi-lan-ip>:8080/stream.mjpg --gate relay --relay-url http://192.168.1.167:4000` |
+| Manual motor REPL | **LAPTOP** | — | no | `python -m pi.manual_drive --host <pi-lan-ip> --telemetry` |
+| YOLO webcam smoke test | **LAPTOP** | — | one-time | `python tools/live_detect.py --weights models/trash_v1.pt` |
 
-That's the whole rig. You can bring any subset up for targeted
-debugging — everything except the three `required` services fails open.
+### Port cheat sheet (who listens, who talks)
+
+| Port | Listener | Connected by |
+| --- | --- | --- |
+| `4000` (HTTP) | **Laptop** relay | Phones A+B, `brain.main` (for `/robot/packet` when gated) |
+| `8080` (MJPEG) | **Pi** camera streamer | `brain.main` (laptop), `demo.py` (laptop), browser |
+| `8765` (WS JSON) | **Pi** motor controller | `brain.main` (laptop) **and** phone B (robot-console) simultaneously |
+| `19000–19006` (Metro) | **Laptop** Expo | Phones A+B over LAN |
+
+`brain.main` is the AI. `demo.py` is a visualizer. Don't confuse them.
