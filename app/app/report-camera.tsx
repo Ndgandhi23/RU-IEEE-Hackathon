@@ -1,5 +1,5 @@
 import { useFocusEffect } from '@react-navigation/native';
-import { CameraView, useCameraPermissions } from 'expo-camera';
+import { CameraType, CameraView, useCameraPermissions } from 'expo-camera';
 import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
 import * as Location from 'expo-location';
@@ -7,12 +7,18 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import { Ionicons } from '@expo/vector-icons';
-import { runOnJS, useSharedValue } from 'react-native-reanimated';
+import Animated, {
+  Easing,
+  useAnimatedStyle,
+  useSharedValue,
+  withDelay,
+  withRepeat,
+  withTiming,
+} from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { CAMPUSES, CampusDefinition, CampusId } from '@/constants/campuses';
 import { useReporterContext } from '@/context/reporter-context';
-import { submitTrashReport } from '@/services/routing-api';
 import { Coordinates } from '@/types/routing';
 
 export default function ReportCameraRoute() {
@@ -20,21 +26,67 @@ export default function ReportCameraRoute() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
-  const {
-    selectedCampusId,
-    registerSubmission,
-    refreshReportFeed,
-    setSelectedCampusId,
-  } = useReporterContext();
+  const { selectedCampusId, setSelectedCampusId } = useReporterContext();
   const [reporterLocation, setReporterLocation] = useState<Coordinates | null>(null);
   const [locationStatus, setLocationStatus] = useState<'idle' | 'locating' | 'ready' | 'error'>('idle');
   const [cameraStatus, setCameraStatus] = useState<'checking' | 'ready' | 'denied'>('checking');
   const [capturedPhotoUri, setCapturedPhotoUri] = useState<string | null>(null);
   const [captureBusy, setCaptureBusy] = useState(false);
-  const [submitBusy, setSubmitBusy] = useState(false);
   const [zoomLevel, setZoomLevel] = useState(0);
-  const zoomValue = useSharedValue(0);
-  const zoomStart = useSharedValue(0);
+  const [cameraFacing, setCameraFacing] = useState<CameraType>('back');
+  const zoomStartRef = useRef(0);
+
+  const spinnerOpacity = useSharedValue(0);
+  const spinnerRotation = useSharedValue(0);
+  const previewOpacity = useSharedValue(0);
+  const previewControlsOpacity = useSharedValue(0);
+  const captureControlsOpacity = useSharedValue(1);
+
+  useEffect(() => {
+    spinnerRotation.value = withRepeat(
+      withTiming(360, { duration: 900, easing: Easing.linear }),
+      -1,
+      false
+    );
+  }, [spinnerRotation]);
+
+  useEffect(() => {
+    if (captureBusy) {
+      spinnerOpacity.value = withTiming(1, { duration: 180 });
+      captureControlsOpacity.value = withTiming(0, { duration: 160 });
+    } else {
+      spinnerOpacity.value = withTiming(0, { duration: 220 });
+      if (!capturedPhotoUri) {
+        captureControlsOpacity.value = withTiming(1, { duration: 260 });
+      }
+    }
+  }, [captureBusy, capturedPhotoUri, captureControlsOpacity, spinnerOpacity]);
+
+  useEffect(() => {
+    if (capturedPhotoUri) {
+      previewOpacity.value = withDelay(80, withTiming(1, { duration: 320 }));
+      previewControlsOpacity.value = withDelay(320, withTiming(1, { duration: 280 }));
+      captureControlsOpacity.value = withTiming(0, { duration: 160 });
+    } else {
+      previewOpacity.value = withTiming(0, { duration: 180 });
+      previewControlsOpacity.value = withTiming(0, { duration: 160 });
+      captureControlsOpacity.value = withDelay(80, withTiming(1, { duration: 260 }));
+    }
+  }, [capturedPhotoUri, captureControlsOpacity, previewControlsOpacity, previewOpacity]);
+
+  const spinnerStyle = useAnimatedStyle(() => ({ opacity: spinnerOpacity.value }));
+  const spinnerRingStyle = useAnimatedStyle(() => ({
+    transform: [{ rotate: `${spinnerRotation.value}deg` }],
+  }));
+  const previewImageStyle = useAnimatedStyle(() => ({ opacity: previewOpacity.value }));
+  const previewControlsStyle = useAnimatedStyle(() => ({
+    opacity: previewControlsOpacity.value,
+    transform: [{ translateY: (1 - previewControlsOpacity.value) * 14 }],
+  }));
+  const captureControlsStyle = useAnimatedStyle(() => ({
+    opacity: captureControlsOpacity.value,
+    transform: [{ translateY: (1 - captureControlsOpacity.value) * 14 }],
+  }));
 
   const refreshLocation = useCallback(async () => {
     try {
@@ -106,20 +158,28 @@ export default function ReportCameraRoute() {
     }
   }, [cameraPermission]);
 
-  function updateZoomLevel(value: number) {
-    setZoomLevel(clamp(value));
-  }
-
   const pinchGesture = Gesture.Pinch()
     .enabled(!capturedPhotoUri && cameraStatus === 'ready')
+    .runOnJS(true)
     .onStart(() => {
-      zoomStart.value = zoomValue.value;
+      zoomStartRef.current = zoomLevel;
     })
     .onUpdate((event) => {
-      const nextZoom = clamp(zoomStart.value + (event.scale - 1) * 0.22);
-      zoomValue.value = nextZoom;
-      runOnJS(updateZoomLevel)(nextZoom);
+      const next = clamp(zoomStartRef.current + (event.scale - 1) * 0.15);
+      setZoomLevel((prev) => (Math.abs(prev - next) < 0.01 ? prev : next));
     });
+
+  function resetZoom() {
+    setZoomLevel(0);
+  }
+
+  function handleFlipCamera() {
+    if (capturedPhotoUri) {
+      return;
+    }
+    resetZoom();
+    setCameraFacing((prev) => (prev === 'back' ? 'front' : 'back'));
+  }
 
   async function handleTakePhoto() {
     if (!cameraRef.current || captureBusy) {
@@ -147,40 +207,39 @@ export default function ReportCameraRoute() {
     }
   }
 
-  async function handleSubmit() {
-    if (!capturedPhotoUri || !reporterLocation) {
+  function handleDone() {
+    if (!capturedPhotoUri) {
+      return;
+    }
+    if (!reporterLocation) {
       Alert.alert(
         'Still preparing',
-        'The photo and GPS fix both need to be ready before the report can be submitted.'
+        'The GPS fix needs to be ready before you can caption and share this report.'
       );
       return;
     }
 
-    try {
-      setSubmitBusy(true);
-      const response = await submitTrashReport({
+    router.push({
+      pathname: '/report-details',
+      params: {
         photoUri: capturedPhotoUri,
-        reporterLocation,
-      });
-
-      registerSubmission(response.report, response.mode);
-      setCapturedPhotoUri(null);
-      await refreshLocation();
-      await refreshReportFeed(false);
-      router.back();
-    } catch (error) {
-      Alert.alert('Report failed', error instanceof Error ? error.message : 'Unknown upload error.');
-    } finally {
-      setSubmitBusy(false);
-    }
+        latitude: String(reporterLocation.latitude),
+        longitude: String(reporterLocation.longitude),
+        timestamp: reporterLocation.timestamp,
+        accuracy:
+          reporterLocation.accuracy != null ? String(reporterLocation.accuracy) : '',
+      },
+    });
   }
 
   function handleRetake() {
     setCapturedPhotoUri(null);
+    resetZoom();
   }
 
   function handleClose() {
     setCapturedPhotoUri(null);
+    resetZoom();
     router.back();
   }
 
@@ -215,36 +274,61 @@ export default function ReportCameraRoute() {
     );
   }
 
-  const cameraBody = capturedPhotoUri ? (
-    <Image contentFit="cover" source={{ uri: capturedPhotoUri }} style={styles.camera} />
-  ) : (
-    <GestureDetector gesture={pinchGesture}>
-      <CameraView ref={cameraRef} facing="back" style={styles.camera} zoom={zoomLevel} />
-    </GestureDetector>
-  );
-
   return (
     <View style={styles.screen}>
-      {cameraBody}
+      <GestureDetector gesture={pinchGesture}>
+        <CameraView ref={cameraRef} facing={cameraFacing} style={styles.camera} zoom={zoomLevel} />
+      </GestureDetector>
 
-      <View style={styles.overlay}>
+      {capturedPhotoUri ? (
+        <Animated.View
+          pointerEvents="none"
+          style={[StyleSheet.absoluteFillObject, previewImageStyle]}>
+          <Image contentFit="cover" source={{ uri: capturedPhotoUri }} style={styles.camera} />
+        </Animated.View>
+      ) : null}
+
+      <Animated.View
+        pointerEvents="none"
+        style={[styles.captureSpinnerWrap, spinnerStyle]}>
+        <View style={styles.captureSpinnerCard}>
+          <View style={styles.ringTrack} />
+          <Animated.View style={[styles.ringArc, spinnerRingStyle]} />
+        </View>
+      </Animated.View>
+
+      <View style={styles.overlay} pointerEvents="box-none">
         <Pressable onPress={handleClose} style={[styles.topCloseButton, { top: insets.top + 16 }]}>
           <Ionicons color="#FFFFFF" name="close" size={24} />
         </Pressable>
 
+        {!capturedPhotoUri ? (
+          <Pressable
+            onPress={handleFlipCamera}
+            style={({ pressed }) => [
+              styles.topFlipButton,
+              { top: insets.top + 16 },
+              pressed && styles.topFlipButtonPressed,
+            ]}>
+            <Ionicons color="#FFFFFF" name="camera-reverse-outline" size={24} />
+          </Pressable>
+        ) : null}
+
+        {!capturedPhotoUri && zoomLevel > 0.001 ? (
+          <View style={[styles.zoomBadge, { top: insets.top + 16 }]} pointerEvents="none">
+            <Text style={styles.zoomBadgeLabel}>{formatZoomLabel(zoomLevel)}</Text>
+          </View>
+        ) : null}
+
         <View style={[styles.bottomControls, { bottom: Math.max(insets.bottom, 14) }]}>
           {capturedPhotoUri ? (
-            <View style={styles.previewControls}>
-              <CircularIconButton icon="refresh" disabled={submitBusy} onPress={handleRetake} />
+            <Animated.View style={[styles.previewControls, previewControlsStyle]}>
+              <CircularIconButton icon="refresh" onPress={handleRetake} />
               <View style={styles.previewSpacer} />
-              <CircularIconButton
-                icon={submitBusy ? 'cloud-upload-outline' : 'arrow-up'}
-                disabled={submitBusy}
-                onPress={handleSubmit}
-              />
-            </View>
+              <CircularLabelButton label="Done" onPress={handleDone} />
+            </Animated.View>
           ) : (
-            <View style={styles.captureControls}>
+            <Animated.View style={[styles.captureControls, captureControlsStyle]}>
               <View style={styles.captureSideSpacer} />
               <Pressable
                 onPress={handleTakePhoto}
@@ -253,7 +337,7 @@ export default function ReportCameraRoute() {
                 <View style={styles.shutterInner} />
               </Pressable>
               <View style={styles.captureSideSpacer} />
-            </View>
+            </Animated.View>
           )}
         </View>
       </View>
@@ -280,8 +364,32 @@ function CircularIconButton({
   );
 }
 
+function CircularLabelButton({
+  label,
+  disabled,
+  onPress,
+}: {
+  label: string;
+  disabled?: boolean;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      disabled={disabled}
+      onPress={onPress}
+      style={[styles.iconButton, disabled && styles.disabledButton]}>
+      <Text style={styles.iconButtonLabel}>{label}</Text>
+    </Pressable>
+  );
+}
+
 function clamp(value: number) {
   return Math.max(0, Math.min(1, Number(value.toFixed(3))));
+}
+
+function formatZoomLabel(zoom: number) {
+  const multiplier = 1 + zoom * 9;
+  return `${multiplier < 10 ? multiplier.toFixed(1) : Math.round(multiplier)}x`;
 }
 
 function isWithinCampusBounds(location: Coordinates, campus: CampusDefinition) {
@@ -320,6 +428,19 @@ const styles = StyleSheet.create({
     position: 'absolute',
     width: 44,
   },
+  topFlipButton: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.52)',
+    borderRadius: 22,
+    height: 44,
+    justifyContent: 'center',
+    position: 'absolute',
+    right: 18,
+    width: 44,
+  },
+  topFlipButtonPressed: {
+    backgroundColor: 'rgba(0,0,0,0.72)',
+  },
   bottomControls: {
     left: 18,
     position: 'absolute',
@@ -329,6 +450,58 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     flexDirection: 'row',
     justifyContent: 'center',
+  },
+  captureSpinnerWrap: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  captureSpinnerCard: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    borderRadius: 36,
+    height: 72,
+    justifyContent: 'center',
+    shadowColor: '#34C759',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.55,
+    shadowRadius: 14,
+    width: 72,
+  },
+  ringTrack: {
+    borderColor: 'rgba(52,199,89,0.2)',
+    borderRadius: 22,
+    borderWidth: 4,
+    height: 44,
+    position: 'absolute',
+    width: 44,
+  },
+  ringArc: {
+    borderBottomColor: 'transparent',
+    borderColor: '#34C759',
+    borderLeftColor: 'transparent',
+    borderRadius: 22,
+    borderRightColor: 'transparent',
+    borderWidth: 4,
+    height: 44,
+    position: 'absolute',
+    width: 44,
+  },
+  zoomBadge: {
+    alignItems: 'center',
+    alignSelf: 'center',
+    backgroundColor: 'rgba(0,0,0,0.56)',
+    borderRadius: 14,
+    minWidth: 56,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    position: 'absolute',
+  },
+  zoomBadgeLabel: {
+    color: '#FFE27A',
+    fontSize: 13,
+    fontWeight: '800',
+    letterSpacing: 0.3,
   },
   captureSideSpacer: {
     flex: 1,
@@ -364,6 +537,12 @@ const styles = StyleSheet.create({
     height: 52,
     justifyContent: 'center',
     width: 52,
+  },
+  iconButtonLabel: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '800',
+    letterSpacing: 0.3,
   },
   disabledButton: {
     opacity: 0.52,

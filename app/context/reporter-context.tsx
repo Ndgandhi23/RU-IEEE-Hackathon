@@ -20,9 +20,9 @@ type ReporterContextValue = {
 };
 
 const defaultEnabledCampuses: EnabledCampuses = {
-  'new-brunswick': true,
-  newark: true,
-  camden: true,
+  'college-avenue': true,
+  busch: true,
+  livingston: true,
 };
 
 const emptyFeed: ReportFeed = {
@@ -33,7 +33,7 @@ const emptyFeed: ReportFeed = {
 const ReporterContext = createContext<ReporterContextValue | null>(null);
 
 export function ReporterProvider({ children }: PropsWithChildren) {
-  const [selectedCampusId, setSelectedCampusId] = useState<CampusId>('new-brunswick');
+  const [selectedCampusId, setSelectedCampusId] = useState<CampusId>('college-avenue');
   const [enabledCampuses, setEnabledCampuses] = useState<EnabledCampuses>(defaultEnabledCampuses);
   const [reportFeed, setReportFeed] = useState<ReportFeed>(emptyFeed);
   const [feedBusy, setFeedBusy] = useState(false);
@@ -61,16 +61,19 @@ export function ReporterProvider({ children }: PropsWithChildren) {
     }
   }, [enabledCampuses, selectedCampusId]);
 
-  async function refreshReportFeed(_showError = false) {
+  async function refreshReportFeed(showError = false) {
     try {
       setFeedBusy(true);
       const nextFeed = await fetchReportFeed();
       setReportFeed(nextFeed);
     } catch (error) {
-      console.warn(
-        '[reporter-context] report feed refresh failed',
-        error instanceof Error ? error.message : error
+      const message = error instanceof Error ? error.message : String(error);
+      const isOfflineOrTimeout = /timed out|network request failed|failed to fetch|aborted/i.test(
+        message
       );
+      if (showError || !isOfflineOrTimeout) {
+        console.warn('[reporter-context] report feed refresh failed', message);
+      }
     } finally {
       setFeedBusy(false);
     }

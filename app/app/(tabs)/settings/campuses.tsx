@@ -1,17 +1,18 @@
 import { ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
 
 import { CAMPUSES } from '@/constants/campuses';
-import { palette, radius } from '@/constants/theme';
+import { radius } from '@/constants/theme';
 import { useReporterContext } from '@/context/reporter-context';
 
-export default function UniversitiesScreen() {
+export default function CampusesScreen() {
   const { enabledCampuses, toggleCampus } = useReporterContext();
 
   return (
-    <ScrollView contentContainerStyle={styles.content}>
-      <Text style={styles.caption}>
-        Choose which Rutgers campuses appear in the reporter map experience.
-      </Text>
+    <ScrollView
+      contentContainerStyle={styles.content}
+      contentInsetAdjustmentBehavior="automatic"
+      style={styles.scroll}>
+      <Text style={styles.sectionHeader}>ENABLED CAMPUSES</Text>
 
       <View style={styles.group}>
         {CAMPUSES.map((campus, index) => (
@@ -19,21 +20,25 @@ export default function UniversitiesScreen() {
             <View style={styles.row}>
               <View style={styles.copy}>
                 <Text style={styles.rowTitle}>{campus.name}</Text>
-                <Text style={styles.rowSubtitle}>
-                  Include this campus in map rendering and trash overlays.
-                </Text>
+                <Text style={styles.rowSubtitle}>{campus.shortName}</Text>
               </View>
               <Switch
                 value={enabledCampuses[campus.id]}
                 onValueChange={() => toggleCampus(campus.id)}
-                trackColor={{ false: '#D8D2C4', true: '#7FC8AE' }}
-                thumbColor={enabledCampuses[campus.id] ? palette.primary : '#F7F4EC'}
+                trackColor={{ false: '#E5E5EA', true: '#34C759' }}
+                thumbColor="#FFFFFF"
+                ios_backgroundColor="#E5E5EA"
               />
             </View>
             {index < CAMPUSES.length - 1 ? <Divider /> : null}
           </View>
         ))}
       </View>
+
+      <Text style={styles.sectionFooter}>
+        Toggle which Rutgers–New Brunswick campuses appear in the reporter map
+        and trash overlays.
+      </Text>
     </ScrollView>
   );
 }
@@ -43,21 +48,33 @@ function Divider() {
 }
 
 const styles = StyleSheet.create({
+  scroll: {
+    backgroundColor: '#F2F2F7',
+  },
   content: {
-    gap: 14,
     paddingBottom: 36,
     paddingHorizontal: 16,
-    paddingTop: 20,
+    paddingTop: 0,
   },
-  caption: {
+  sectionHeader: {
     color: '#6D6D72',
-    fontSize: 14,
-    lineHeight: 20,
-    paddingHorizontal: 4,
+    fontSize: 13,
+    fontWeight: '500',
+    letterSpacing: 0.4,
+    marginBottom: 6,
+    marginTop: 8,
+    paddingHorizontal: 16,
+  },
+  sectionFooter: {
+    color: '#6D6D72',
+    fontSize: 12,
+    lineHeight: 17,
+    marginTop: 6,
+    paddingHorizontal: 16,
   },
   group: {
     backgroundColor: '#FFFFFF',
-    borderRadius: radius.lg,
+    borderRadius: radius.md,
     overflow: 'hidden',
   },
   row: {
@@ -65,22 +82,21 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: 12,
     justifyContent: 'space-between',
-    minHeight: 64,
+    minHeight: 56,
     paddingHorizontal: 16,
-    paddingVertical: 14,
+    paddingVertical: 10,
   },
   copy: {
     flex: 1,
-    gap: 4,
+    gap: 2,
     paddingRight: 12,
   },
   rowTitle: {
     color: '#111112',
-    fontSize: 16,
-    fontWeight: '600',
+    fontSize: 17,
   },
   rowSubtitle: {
-    color: '#6D6D72',
+    color: '#8A8A8E',
     fontSize: 13,
     lineHeight: 18,
   },

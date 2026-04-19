@@ -1,4 +1,4 @@
-export type CampusId = 'new-brunswick' | 'newark' | 'camden';
+export type CampusId = 'college-avenue' | 'busch' | 'livingston';
 
 export type CampusBoundingBox = {
   minLat: number;
@@ -21,59 +21,60 @@ export type CampusDefinition = {
   };
 };
 
-// Campus framing boxes are inferred from Rutgers public campus maps and visit pages.
+// Bounding boxes and region centers are inferred from Rutgers–New Brunswick
+// campus maps. Cook/Douglass is intentionally excluded.
 export const CAMPUSES: CampusDefinition[] = [
   {
-    id: 'new-brunswick',
-    name: 'Rutgers–New Brunswick',
-    shortName: 'New Brunswick',
+    id: 'college-avenue',
+    name: 'College Avenue',
+    shortName: 'College Ave',
+    accent: '#CC0033',
+    boundingBox: {
+      minLat: 40.4960,
+      maxLat: 40.5060,
+      minLon: -74.4520,
+      maxLon: -74.4430,
+    },
+    region: {
+      latitude: 40.5008,
+      longitude: -74.4474,
+      latitudeDelta: 0.018,
+      longitudeDelta: 0.018,
+    },
+  },
+  {
+    id: 'busch',
+    name: 'Busch Campus',
+    shortName: 'Busch',
+    accent: '#0A84FF',
+    boundingBox: {
+      minLat: 40.5150,
+      maxLat: 40.5315,
+      minLon: -74.4720,
+      maxLon: -74.4540,
+    },
+    region: {
+      latitude: 40.5228,
+      longitude: -74.4631,
+      latitudeDelta: 0.022,
+      longitudeDelta: 0.024,
+    },
+  },
+  {
+    id: 'livingston',
+    name: 'Livingston Campus',
+    shortName: 'Livingston',
     accent: '#147154',
     boundingBox: {
-      minLat: 40.4625,
-      maxLat: 40.5369,
-      minLon: -74.4898,
-      maxLon: -74.3994,
+      minLat: 40.5160,
+      maxLat: 40.5325,
+      minLon: -74.4445,
+      maxLon: -74.4275,
     },
     region: {
-      latitude: 40.4997,
-      longitude: -74.4446,
-      latitudeDelta: 0.085,
-      longitudeDelta: 0.105,
-    },
-  },
-  {
-    id: 'newark',
-    name: 'Rutgers–Newark',
-    shortName: 'Newark',
-    accent: '#D96B2B',
-    boundingBox: {
-      minLat: 40.7286,
-      maxLat: 40.7489,
-      minLon: -74.1876,
-      maxLon: -74.1645,
-    },
-    region: {
-      latitude: 40.73875,
-      longitude: -74.17605,
-      latitudeDelta: 0.025,
-      longitudeDelta: 0.03,
-    },
-  },
-  {
-    id: 'camden',
-    name: 'Rutgers–Camden',
-    shortName: 'Camden',
-    accent: '#8A4DFF',
-    boundingBox: {
-      minLat: 39.936,
-      maxLat: 39.9505,
-      minLon: -75.1295,
-      maxLon: -75.112,
-    },
-    region: {
-      latitude: 39.94325,
-      longitude: -75.12075,
-      latitudeDelta: 0.02,
+      latitude: 40.5242,
+      longitude: -74.4371,
+      latitudeDelta: 0.022,
       longitudeDelta: 0.022,
     },
   },
@@ -82,4 +83,3 @@ export const CAMPUSES: CampusDefinition[] = [
 export function getCampusById(id: CampusId) {
   return CAMPUSES.find((campus) => campus.id === id) ?? CAMPUSES[0];
 }
-

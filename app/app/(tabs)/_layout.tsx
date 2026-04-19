@@ -14,6 +14,8 @@ export default function TabLayout() {
       screenOptions={{
         animation: 'fade',
         headerShown: false,
+        lazy: true,
+        freezeOnBlur: true,
         tabBarActiveTintColor: palette.primary,
         tabBarInactiveTintColor: palette.muted,
         tabBarStyle: {
@@ -28,14 +30,13 @@ export default function TabLayout() {
         name="report"
         options={{
           title: 'Report',
-          tabBarActiveTintColor: palette.primary,
           tabBarIcon: ({ color, size }) => (
             <Ionicons size={size} name="camera-outline" color={color} />
           ),
           tabBarButton: () => (
             <Pressable onPress={() => router.push('/report-camera')} style={styles.reportTabButton}>
               <View style={styles.reportTabIconWrap}>
-                <Ionicons color={palette.primary} name="camera-outline" size={22} />
+                <Ionicons color={palette.muted} name="camera-outline" size={22} />
               </View>
               <Text style={styles.reportTabLabel}>Report</Text>
             </Pressable>
@@ -72,7 +73,7 @@ const styles = StyleSheet.create({
     marginBottom: 4,
   },
   reportTabLabel: {
-    color: palette.primary,
+    color: palette.muted,
     fontSize: 10,
     fontWeight: '600',
   },

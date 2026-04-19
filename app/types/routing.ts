@@ -7,6 +7,14 @@ export type Coordinates = {
   timestamp: string;
 };
 
+export type TrashCategory =
+  | 'plastic'
+  | 'paper'
+  | 'food'
+  | 'glass'
+  | 'hazardous'
+  | 'other';
+
 export type TrashReport = {
   id: string;
   createdAt: string;
@@ -14,6 +22,8 @@ export type TrashReport = {
   photoUrl?: string;
   reporterLocation: Coordinates;
   status?: 'pending' | 'assigned' | 'completed';
+  caption?: string | null;
+  trashCategory?: TrashCategory | null;
 };
 
 export type RouteResponseMode = 'backend' | 'mock';
@@ -62,6 +72,8 @@ export type RobotPacket = {
 export type SubmitReportInput = {
   photoUri: string;
   reporterLocation: Coordinates;
+  caption?: string | null;
+  trashCategory?: TrashCategory | null;
 };
 
 export type ReportFeed = {

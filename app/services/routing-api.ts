@@ -40,6 +40,8 @@ export async function submitTrashReport(input: SubmitReportInput): Promise<Submi
     'metadata',
     JSON.stringify({
       reporterLocation: input.reporterLocation,
+      caption: input.caption ?? null,
+      trashCategory: input.trashCategory ?? null,
     })
   );
 
@@ -170,6 +172,8 @@ function createLocalReport(input: SubmitReportInput): TrashReport {
     photoUri: input.photoUri,
     reporterLocation: input.reporterLocation,
     status: 'pending',
+    caption: input.caption ?? null,
+    trashCategory: input.trashCategory ?? null,
   };
 }
 

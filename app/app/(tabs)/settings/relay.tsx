@@ -8,37 +8,69 @@ export default function RelayScreen() {
   const { feedBusy, refreshReportFeed, reportFeed } = useReporterContext();
 
   return (
-    <ScrollView contentContainerStyle={styles.content}>
-      <Text style={styles.caption}>
-        Inspect the current relay mode, assignment state, and manually refresh the queue feed.
-      </Text>
-
+    <ScrollView
+      contentContainerStyle={styles.content}
+      contentInsetAdjustmentBehavior="automatic"
+      style={styles.scroll}>
+      <Text style={[styles.sectionHeader, styles.sectionHeaderFirst]}>STATUS</Text>
       <View style={styles.group}>
-        <SettingsValueRow
-          label="Backend mode"
-          value={hasRemoteBackend() ? 'Live relay feed' : 'Mock feed'}
+        <ValueRow
+          label="Mode"
+          value={hasRemoteBackend() ? 'Live relay' : 'Mock feed'}
+          valueColor={hasRemoteBackend() ? '#34C759' : '#8A8A8E'}
         />
         <Divider />
-        <SettingsValueRow label="Feed refresh" value={feedBusy ? 'Refreshing' : 'Idle'} />
+        <ValueRow label="Feed" value={feedBusy ? 'Refreshing…' : 'Idle'} />
+      </View>
+      <Text style={styles.sectionFooter}>
+        Live relay requires the backend URL to be configured.
+      </Text>
+
+      <Text style={styles.sectionHeader}>QUEUE</Text>
+      <View style={styles.group}>
+        <ValueRow
+          label="Active assignment"
+          value={reportFeed.activeAssignmentId ?? 'None'}
+        />
         <Divider />
-        <SettingsValueRow label="Active robot target" value={reportFeed.activeAssignmentId ?? 'None'} />
-        <Divider />
-        <SettingsValueRow label="Queued reports" value={String(reportFeed.reports.length)} />
-        <Divider />
-        <Pressable onPress={() => void refreshReportFeed(true)} style={styles.row}>
+        <ValueRow label="Queued reports" value={String(reportFeed.reports.length)} />
+      </View>
+
+      <Text style={styles.sectionHeader}>ACTIONS</Text>
+      <View style={styles.group}>
+        <Pressable
+          onPress={() => void refreshReportFeed(true)}
+          android_ripple={{ color: 'rgba(0,0,0,0.06)' }}
+          style={({ pressed }) => [styles.row, pressed && styles.rowPressed]}>
           <Text style={styles.actionLabel}>Refresh relay feed</Text>
-          <Text style={styles.actionValue}>Run now</Text>
         </Pressable>
       </View>
+      <Text style={styles.sectionFooter}>
+        Manually re-query the relay for the latest queue state.
+      </Text>
     </ScrollView>
   );
 }
 
-function SettingsValueRow({ label, value }: { label: string; value: string }) {
+function ValueRow({
+  label,
+  value,
+  valueColor,
+}: {
+  label: string;
+  value: string;
+  valueColor?: string;
+}) {
   return (
     <View style={styles.row}>
-      <Text style={styles.rowTitle}>{label}</Text>
-      <Text style={styles.rowValue}>{value}</Text>
+      <Text style={styles.rowTitle} numberOfLines={1}>
+        {label}
+      </Text>
+      <Text
+        style={[styles.rowValue, valueColor ? { color: valueColor } : null]}
+        numberOfLines={1}>
+        {value}
+      </Text>
     </View>
   );
 }
@@ -48,49 +80,65 @@ function Divider() {
 }
 
 const styles = StyleSheet.create({
+  scroll: {
+    backgroundColor: '#F2F2F7',
+  },
   content: {
-    gap: 14,
     paddingBottom: 36,
     paddingHorizontal: 16,
-    paddingTop: 20,
+    paddingTop: 0,
   },
-  caption: {
+  sectionHeader: {
     color: '#6D6D72',
-    fontSize: 14,
-    lineHeight: 20,
-    paddingHorizontal: 4,
+    fontSize: 13,
+    fontWeight: '500',
+    letterSpacing: 0.4,
+    marginBottom: 6,
+    marginTop: 24,
+    paddingHorizontal: 16,
+  },
+  sectionHeaderFirst: {
+    marginTop: 8,
+  },
+  sectionFooter: {
+    color: '#6D6D72',
+    fontSize: 12,
+    lineHeight: 17,
+    marginTop: 6,
+    paddingHorizontal: 16,
   },
   group: {
     backgroundColor: '#FFFFFF',
-    borderRadius: radius.lg,
+    borderRadius: radius.md,
     overflow: 'hidden',
   },
   row: {
     alignItems: 'center',
     flexDirection: 'row',
     justifyContent: 'space-between',
-    minHeight: 52,
+    minHeight: 44,
     paddingHorizontal: 16,
-    paddingVertical: 14,
+    paddingVertical: 12,
+  },
+  rowPressed: {
+    backgroundColor: '#D1D1D6',
   },
   rowTitle: {
     color: '#111112',
-    fontSize: 16,
+    flex: 1,
+    fontSize: 17,
   },
   rowValue: {
     color: '#8A8A8E',
     fontSize: 16,
     marginLeft: 12,
+    maxWidth: '60%',
     textAlign: 'right',
   },
   actionLabel: {
-    color: '#111112',
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  actionValue: {
     color: '#007AFF',
-    fontSize: 16,
+    fontSize: 17,
+    fontWeight: '500',
   },
   divider: {
     backgroundColor: '#E8E8ED',
