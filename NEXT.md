@@ -65,13 +65,20 @@ We previously considered splitting perception (4080) and nav (4070) across two d
 ### 1. Verify the YOLO model works on real-world frames (~30 min)
 Run `python demo.py`, hold up a bottle and a can, confirm detection works. If `bottle` confidence is reliably >0.8 under your lighting, the model is good. If not, flag it — we may need imgsz or conf tuning.
 
-### 2. OWLv2 target finder (new code, ~1 hr)
+### 2. OWLv2 target finder — **scaffolded, not yet validated on GPU**
 [brain/perception/target_finder.py](brain/perception/target_finder.py) — image-conditioned detector. Wraps `google/owlv2-base-patch16-ensemble` via HuggingFace `transformers`. API:
-- `load_reference(crop: np.ndarray)` — pre-compute + cache the reference embedding once at task start
-- `detect(frame: np.ndarray) -> list[Detection]` — run image-guided detection against the cached embedding, return boxes sorted by similarity
-- Threshold via `TARGET_MIN_SIM` (start 0.3)
+- `load_reference(crop: np.ndarray | Path | str)` — set the reference image
+- `detect(frame: np.ndarray) -> list[Detection]` — run image-guided detection, return boxes sorted by similarity (descending)
+- Threshold via `TARGET_MIN_SIM` (start 0.3). Reuses `Detection` dataclass from `detector.py`.
 
-Testable offline with any (reference, live-frame) pair. Plan: a `tools/test_target_finder.py` analogous to `tools/live_detect.py`, takes `--reference path/to/crop.jpg` and runs OWLv2 on the webcam.
+Smoke test with webcam + a reference image:
+```bash
+pip install -r requirements.txt   # transformers + Pillow added
+python tools/test_target_finder.py --reference path/to/query.jpg
+# first run downloads OWLv2 weights (~300 MB) to HF cache
+```
+
+Auto-picks device: cuda → mps → cpu. On the 4080 brain, expect 25+ FPS. On a Mac without CUDA/MPS, ~1–2 FPS (fine for validation, not for running the loop).
 
 ### 3. Pi-side motor controller + streaming (new code, ~2 hr)
 Create `pi/motor_controller/main.py` on the Pi:
@@ -138,7 +145,7 @@ RU-IEEE-Hackathon/
 │   ├── nav/geo.py           # ✓ built
 │   ├── io/webcam.py         # ✓ built
 │   ├── perception/detector.py       # ✓ built (YOLOv8n for obstacles / general)
-│   ├── perception/target_finder.py  # TODO (OWLv2 image-conditioned target finder)
+│   ├── perception/target_finder.py  # ✓ scaffolded (OWLv2 image-conditioned target finder) — needs GPU validation
 │   ├── io/pi_bridge.py      # TODO
 │   ├── io/iphone_listener.py # TODO
 │   └── main.py              # TODO (state machine)
