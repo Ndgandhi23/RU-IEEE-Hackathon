@@ -27,24 +27,23 @@ A lightweight **relay** (Node/Express, under `relay/`) is the only shared backen
 
 | Component | Purpose |
 |---|---|
-| Brain desktop (RTX 4080, 16 GB VRAM) | Runs all heavy compute: YOLOv8n obstacle detection, OWLv2 image-conditioned target finder, nav control loop, state machine, FastAPI listener for iPhone GPS. Not on the robot — operates remotely over local WiFi. |
-| Raspberry Pi 3B (on robot) | Edge node. Drives motors via H-bridge, reads ultrasonics, runs intake motor, streams webcam frames and sensor data to the brain machine over WebSocket / MJPEG. No business logic. |
-| Robot phone (iPhone, mounted) | GPS + heading source. Posts heartbeats directly to the brain machine over local WiFi, OR through the relay. |
+| Brain desktop (RTX 4080, 16 GB VRAM) | Runs OWLv2 + Qwen3-VL + ApproachController. Owns motor control during SEARCHING / APPROACHING / VERIFYING. Not on the robot — operates remotely over local WiFi. |
+| Raspberry Pi 3B (on robot) | Edge node. Drives two NeveRest motors via L298N H-bridge, reads quadrature encoders, streams C270 frames over MJPEG. WebSocket server on :8765 accepts drive commands from BOTH the phone (during NAVIGATING) AND the brain (during SEARCHING+). No business logic. |
+| Robot phone (iPhone, mounted) | GPS + heading source AND nav-loop client. Walks Apple Maps waypoints → drive commands to the Pi during NAVIGATING. Posts GPS heartbeats to the brain so the brain knows when to take over (last waypoint reached). |
 | Reporter phone (iPhone, handheld) | Runs the Expo app's Reporter tab: uploads trash photos + GPS to the relay. Not part of the robot. |
-| Logitech C270 webcam | USB to the Pi. 720p fixed-focus. Frames streamed over WiFi to the brain machine. Used for visual final approach + obstacle detection. |
-| NeveRest 60W motors | Drive motors. PWM via H-bridge from the Pi. |
-| DC motor (intake) | Front intake sweeper/auger. PWM via H-bridge from the Pi. Runs during the INTAKING state. |
-| Ultrasonic sensors (HC-SR04 x3+) | Front-left, front-center, front-right. Reactive obstacle avoidance only. |
+| Logitech C270 webcam | USB to the Pi. 720p fixed-focus. Frames streamed over WiFi to the brain machine. Used for visual final approach (SEARCHING / APPROACHING / VERIFYING). |
+| NeveRest 60W motors (×2) | Drive motors. Signed PWM via L298N from the Pi. 4-pin quadrature encoders on each motor shaft (1680 counts per output-shaft revolution). |
 | Ryobi 18V battery pack | Main power for motors. ~1 hour runtime. |
 | 5V USB supply | Logic / Pi power. |
-| PLA 3D printed chassis + intake funnel | Structural. |
+| PLA 3D printed chassis + scoop | Structural. The front scoop is the "intake" — there is **no separate intake motor**; collection happens by driving forward into the bottle. |
 
 ### Hardware constraints to remember
 - **Network is a hard dependency.** The brain and the Pi talk over local WiFi. If WiFi drops, the Pi's watchdog kills the motors within 500ms. Demo area must have solid WiFi — campus WiFi or a dedicated phone hotspot.
 - **WebSocket round-trip latency matters.** Expect ~50–300ms depending on WiFi. Fine for nav at 0.5 m/s; tight for sub-meter visual servoing. Keep the control loop on the brain, let the Pi just execute.
-- **GPS is primary localization.** The camera runs continuously during nav (course confirmation + obstacle detection — advisory), but only becomes the *primary* nav signal during final approach (last ~3m). See [nav.md](nav.md) for the CV network's three jobs.
+- **GPS is primary localization during NAVIGATING.** Phone uses Apple Maps waypoints + GPS to drive the Pi until it reaches the last waypoint, then yields to the brain.
 - **iPhone compass is sensitive to motor magnetic fields.** Always mount on a stalk well above the chassis. Recalibrate (figure-8 motion) after any physical change.
-- **The Pi has no logic.** Don't add behavior to the Pi. It drives motors, reads sensors, streams frames. Every decision lives on the brain machine.
+- **The Pi has no logic.** Don't add behavior to the Pi. It drives motors, reads encoders, streams frames. Every decision lives on the phone (NAVIGATING) or the brain (SEARCHING+).
+- **Two WS clients on :8765.** Phone and brain both connect. Whoever sent `drive` most recently wins for the next 500 ms (Pi watchdog). Coordination is implicit: the phone stops sending when its waypoint chain ends; the brain starts sending when its iPhone-GPS listener sees the robot inside the last-waypoint radius.
 - **C270 fails in low light and rain.** Demo and test in daylight, dry conditions.
 - **Brain is a single point of failure.** If the 4080 crashes, the robot halts (Pi watchdog zeros motors after 500ms). Keep the brain on wired power, not running other heavy workloads during a run.
 
@@ -65,30 +64,31 @@ A lightweight **relay** (Node/Express, under `relay/`) is the only shared backen
       |                |                  |
 [Robot phone]          |                  |
       |                |                  |
-      v (GPS heartbeat over local WiFi, HTTP)
+      v (GPS heartbeat to brain :8000)
  ┌─────────────────────────────────┐
  │   Brain desktop (RTX 4080)       │
- │  YOLOv8 + OWLv2 + nav + FSM      │
+ │  OWLv2 + Qwen3-VL + Approach FSM │
  │  Runs code under brain/         │
  └────┬──────────────────▲──────────┘
-      │ motor cmds        │ frames + ultrasonics
-      │ (WebSocket JSON)  │ (MJPEG / WebSocket)
+      │ motor cmds        │ frames
+      │ (WebSocket JSON)  │ (MJPEG)
       ▼                   │
  ┌─────────────────────────────────┐
  │   Raspberry Pi 3B (on robot)     │
  │  motor controller + camera proxy │
- └──┬─────┬────────────┬────────────┘
-    │     │            │
-    ▼     ▼            ▼
-[H-bridge][Ultrasonics][C270 webcam]
-    │
-    ▼
-[Drive + Intake motors]
+ │  WS :8765, MJPEG :8080           │
+ └──┬──────────────┬───────────────┘
+    │              │
+    ▼              ▼
+[L298N H-bridge][C270 webcam]
+    │     ▲
+    ▼     │ encoder ticks
+[Drive motors (×2) + 4-pin quadrature encoders]
 ```
 
-The Pi is an I/O proxy. The brain does all decision-making. The relay coordinates tasks across devices. Apple Maps is the path planner.
+**Two clients on Pi :8765**: the **phone** (during NAVIGATING — runs `useRobotNav` + Apple Maps in the Expo app) and the **brain** (during SEARCHING / APPROACHING / VERIFYING — runs OWLv2 + Qwen3-VL). Pi is an I/O proxy and arbitrates with its 500 ms watchdog: most-recent `drive` command wins.
 
-The `brain/` folder holds everything that runs on the brain desktop (RTX 4080): perception (YOLOv8n + OWLv2), nav, state machine, and I/O clients.
+The `brain/` folder holds everything that runs on the brain desktop (RTX 4080): perception (OWLv2 + Qwen3-VL + YOLOv8n) and approach control + I/O clients.
 
 ## Repo Layout
 
@@ -155,15 +155,17 @@ All project docs live in `writeup/`. The root `CLAUDE.md` is a symlink so Claude
 - Body frame: x-forward, y-left, z-up (ROS REP 103 convention) for any IMU work.
 
 ### Pi 3B (motor/sensor/camera proxy)
-- Single Python script. Uses `pigpio` (or `RPi.GPIO`) for PWM + ultrasonic reads, `opencv-python` for the camera, `websockets` or `aiohttp` for the brain link. No business logic.
-- **Transport: WebSocket to the brain machine** (not USB serial as originally specced). The Pi opens a WebSocket server on port 8765 on boot; the brain connects.
-- Inbound JSON from brain:
-  - `{"cmd": "drive", "left": <int>, "right": <int>}` where pwm ∈ [-255, 255].
-  - `{"cmd": "intake", "pwm": <int>}` where pwm ∈ [0, 255]. One direction only — the intake is a sweeper/auger, not reversible.
-- Outbound JSON to brain (at 20Hz):
-  - `{"type": "ultrasonics", "front_cm": N, "left_cm": N, "right_cm": N, "ts": <float>}`
-- Camera frames: **MJPEG over HTTP on port 8080**, served alongside the WebSocket. The brain GETs `http://<pi-ip>:8080/stream.mjpg`. Frames at 480p/15fps to fit WiFi bandwidth.
-- Watchdog: all motors (drive + intake) stop if no `drive` or `intake` message received in 500ms. WiFi drop = robot halts.
+- Two services. **`pi.motor_controller`** = WebSocket on :8765, drives the L298N + reads quadrature encoders. **`pi.camera_streamer`** = MJPEG on :8080 from the C270. Both use `pigpio`/`opencv-python`. No business logic.
+- Multi-client WebSocket on :8765. Phone connects during NAVIGATING; brain connects during SEARCHING+. Both can send `drive`; most-recent wins for the next 500 ms.
+- Inbound JSON (from any client):
+  - `{"cmd": "drive", "left": <int>, "right": <int>}` where pwm ∈ [-255, 255]. Signed: + = forward, − = reverse, 0 = coast.
+  - `{"cmd": "stop"}` — zero both motors immediately.
+  - `{"cmd": "reset_encoders"}` — zero cumulative tick counters.
+- Outbound JSON to all connected clients (at 20 Hz):
+  - `{"type": "state", "ts": <float>, "encoders": {"left": <int>, "right": <int>}, "motors": {"left_pwm": <int>, "right_pwm": <int>}, "watchdog_ok": <bool>}`
+  - Encoders are signed cumulative ticks (1680/output-shaft revolution for NeveRest Classic 60 + 60:1). Brain converts to meters via `π × wheel_diameter / 1680`.
+- Camera frames: **MJPEG over HTTP on port 8080** from `pi.camera_streamer`. The brain GETs `http://<pi-ip>:8080/stream.mjpg`. 480p/15fps.
+- Watchdog: motors zero if no `drive`/`stop` received in 500 ms. WiFi drop = robot halts.
 
 ### Mobile app (Expo / React Native)
 - Lives in `app/`. Two tabs: Reporter and Robot.
@@ -186,39 +188,38 @@ All project docs live in `writeup/`. The root `CLAUDE.md` is a symlink so Claude
 
 ## State Machine
 
-The brain's `main.py` runs this state machine. Treat it as the source of truth for high-level robot behavior. Runs on the brain machine (Mac now), not on the Pi.
+Source of truth for high-level robot behavior. The FSM is **distributed across two devices** — phone owns NAVIGATING, brain owns the vision-driven phases. Handoff happens via the phone's GPS heartbeat to the brain (`brain/io/iphone_listener.py`): when the brain sees the phone GPS inside the last-waypoint radius, it takes over the WS to the Pi.
 
 ```
 IDLE
-  └─(latest report fetched from relay)─> PLANNING
+  └─(latest report fetched from relay)─> PLANNING                         [phone]
 
 PLANNING
-  ├─(Apple Maps route received)────> NAVIGATING
+  ├─(Apple Maps route received)────> NAVIGATING                            [phone]
   └─(no route / relay unreachable)─> REPORTING (failure)
 
-NAVIGATING
-  ├─(within 3m of final waypoint)─> SEARCHING
+NAVIGATING                                                                 [phone]
+  ├─(within 3m of final waypoint)─> SEARCHING                              [→ brain]
   ├─(stuck >10s)──────────────────> REPORTING (failure)
   └─(GPS lost >10s)───────────────> REPORTING (failure)
 
-SEARCHING
+SEARCHING                                                                  [brain]
   ├─(target detected)─────────> APPROACHING
   └─(360° scan, nothing found)─> REPORTING (failure)
 
-APPROACHING
-  ├─(target centered, close)──> INTAKING
-  └─(lost sight >3s)──────────> SEARCHING
+APPROACHING                                                                [brain]
+  ├─(target leaves bottom of frame OR bbox fills frame)─> VERIFYING
+  └─(lost sight >3s)──────────────────────────────────────> SEARCHING
 
-INTAKING
-  └─(intake run complete)─────> VERIFYING
-
-VERIFYING
+VERIFYING                                                                  [brain]
   ├─(target no longer detected)─> REPORTING (success)
   └─(target still visible)──────> SEARCHING (retry)
 
 REPORTING
   └─(POST to relay complete)──> IDLE
 ```
+
+There is **no INTAKING state**. The robot has a passive front scoop, no intake motor — collection is implicit in driving forward during APPROACHING. VERIFYING confirms success (target no longer in frame ≈ inside the scoop or driven past).
 
 Every state transition is logged. Every state has a max-duration timeout that drops to REPORTING (failure) if exceeded. An additional **LINK_LOST** failure mode: if the WebSocket to the Pi drops for >2s, any state that's commanding motors transitions to REPORTING (failure).
 
@@ -230,11 +231,12 @@ Every state transition is logged. Every state has a max-duration timeout that dr
 - `LatestSensorState.get() -> SensorReading | None` returns the most recent reading, or None if stale (>2s).
 
 ### `brain/io/pi_bridge.py`
-- WebSocket client to the Pi's port 8765. Reconnects automatically on disconnect.
-- `PiBridge.set_motors(left: int, right: int)` — pwm ∈ [-255, 255]. Non-blocking; queues the JSON message.
-- `PiBridge.set_intake(pwm: int)` — pwm ∈ [0, 255]. Non-blocking.
-- `PiBridge.get_ultrasonics() -> Ultrasonics` — returns latest reading from the Pi's push stream, or None if stale (>500ms).
-- Connection state (`is_connected`) is observable; loop exits cleanly when the Pi is unreachable.
+- WebSocket client to Pi :8765. Async-internal (own thread + asyncio loop), sync-facing API. Auto-reconnect.
+- `PiBridge.set_motors(left: int, right: int)` — pwm ∈ [-255, 255]. Fire-and-forget JSON `drive` cmd.
+- `PiBridge.stop_motors()` — fire-and-forget JSON `stop` cmd.
+- `PiBridge.reset_encoders()` — fire-and-forget JSON `reset_encoders` cmd.
+- `PiBridge.get_state() -> RobotState | None` — most recent `state` push (encoders, motor PWMs, watchdog_ok), or None if stale (>200 ms — Pi pushes at 20 Hz).
+- `is_connected` is observable. `link_timeout_s` (default 2 s) is for higher-level code that wants to fail the run on a long link drop.
 
 ### `brain/io/webcam.py`
 - Async capture. On the brain desktop, opens a local webcam (builtin or USB) for development.
@@ -290,19 +292,17 @@ These live in code but are reproduced here so you know where to look. If you cha
 
 | Constant | File | Current | Notes |
 |---|---|---|---|
-| `KP_TURN` | `nav/control_loop.py` | 0.02 | Radians per degree of error. Higher = more aggressive turns. Too high → oscillation. |
-| `MAX_FWD` | `nav/control_loop.py` | 0.5 m/s | Outdoor max forward speed. |
-| `MAX_TURN` | `nav/control_loop.py` | 1.0 rad/s | Outdoor max turn rate. |
-| `ARRIVAL_THRESHOLD_M` | `nav/control_loop.py` | 3.0 | Switch from GPS nav to visual search at this distance. |
-| `GPS_ACCURACY_REJECT_M` | `nav/localization.py` | 20.0 | Refuse to act on iPhone readings worse than this. |
-| `GPS_STALENESS_S` | `nav/localization.py` | 2.0 | Reject GPS readings older than this. |
-| `OBSTACLE_STOP_CM` | `nav/avoidance.py` | 60 | Front ultrasonic threshold for reactive avoidance. |
-| `MIN_DETECTION_CONF` | `perception/servo.py` | 0.5 | YOLO confidence threshold for non-target classes (obstacles). |
-| `TARGET_MIN_SIM` | `perception/target_finder.py` | 0.3 | OWLv2 image-similarity threshold for the target. Lower if the reference photo and live view differ in lighting/scale. |
-| `OWLV2_INPUT_SIZE` | `perception/target_finder.py` | 768 | OWLv2 input resolution. 768 is the sweet spot for accuracy vs. FPS on a 4080. |
-| `APPROACH_BOX_FILL` | `perception/servo.py` | 0.4 | Stop driving when target bbox height fills this fraction of frame. |
-| `WAYPOINT_ADVANCE_M` | `nav/waypoint_follower.py` | 2.0 | Switch to the next waypoint when within this distance. |
-| `PI_LINK_TIMEOUT_S` | `io/pi_bridge.py` | 2.0 | Fail the run if WebSocket to Pi is silent for this long. |
+| `STOP_AREA_FRAC` | `brain/control/loop.py` | 0.15 | Trigger STOP when target bbox area / frame area exceeds this. |
+| `ALIGN_TOLERANCE` | `brain/control/loop.py` | 0.15 | |err_frac| under this → drive FORWARD instead of turning. |
+| `SEARCH_FRAMES` | `brain/control/loop.py` | 15 | Rotation ticks queued per VLM scout call. |
+| `ACTION_TO_PWM` | `brain/control/action_to_pwm.py` | (see file) | Discrete Action → (left, right) PWM. Tune on the real robot. |
+| `TARGET_MIN_SIM` | `brain/perception/target_finder.py` | 0.3 | OWLv2 image-similarity threshold. Lower if reference and live view differ in lighting/scale. |
+| `STATE_STALENESS_S` | `brain/io/pi_bridge.py` | 0.2 | Encoder/state push max age. Pi pushes at 20 Hz so 200 ms covers WiFi hiccups. |
+| `PI_LINK_TIMEOUT_S` | `brain/io/pi_bridge.py` | 2.0 | Higher-level "fail the run" hint if the WS has been down this long. |
+| `WATCHDOG_TIMEOUT_S` | `pi/motor_controller/config.py` | 0.5 | Pi zeros motors if no `drive`/`stop` cmd in this long. |
+| `TELEMETRY_HZ` | `pi/motor_controller/config.py` | 20 | Rate of `state` broadcast from Pi to all clients. |
+| `COUNTS_PER_OUTPUT_REV` | `pi/motor_controller/config.py` | 1680 | NeveRest Classic 60: 7 CPR × 4X × 60:1 gearbox. Brain converts ticks → meters using this. |
+| `GPS_STALENESS_S` | `brain/io/iphone_listener.py` | 2.0 | Reject GPS readings older than this. |
 | `DEDUP_RADIUS_M` | `relay/` (TBD) | 5.0 | Reject submissions within this distance of an existing pending report. |
 
 ## Testing
@@ -383,15 +383,18 @@ python tools/replay.py logs/2026-04-18T14-00-00.jsonl
 
 (Update this section as the project evolves. Don't let it go stale.)
 
-- [ ] Relay does not exist yet (`relay/` folder is empty). Contract is specified in [app/README.md](../app/README.md).
-- [ ] Pi motor controller + WebSocket server + MJPEG streamer not yet written (`pi/motor_controller/` folder is empty).
-- [ ] iPhone → brain direct-WiFi listener not yet written.
-- [ ] WebSocket JSON schema above is provisional. Pin it when `pi_bridge.py` and `pi/motor_controller/main.py` are written.
-- [ ] Pick final frame resolution + codec: MJPEG 480p@15fps vs. H.264 stream (WebRTC). MJPEG is simpler; H.264 is better on bandwidth.
-- [ ] Apple Maps server API token not yet provisioned. Relay will need Apple Developer credentials in its `.env`.
-- [ ] Intake run duration not tuned — `INTAKING` state currently runs the intake motor for a fixed duration, no success sensing beyond VERIFYING re-detection.
-- [ ] No battery monitoring yet. Robot can run until the battery dies mid-task.
-- [ ] No charging dock / return-to-base behavior.
+- [x] Pi motor controller (`pi/motor_controller/`) — shipped, encoder-based, watchdog-protected.
+- [x] Pi camera streamer (`pi/camera_streamer/`) — shipped.
+- [x] Brain-side `pi_bridge.py` + `pi_frame_source.py` — shipped, integration-tested.
+- [x] iPhone → brain direct-WiFi listener (`brain/io/iphone_listener.py`) — shipped.
+- [x] WebSocket JSON schema pinned (see § Pi 3B above and `pi/motor_controller/ws_server.py`).
+- [ ] **Phone-side `useRobotNav` + `nav-loop.ts` in the Expo app** — owns NAVIGATING. Speaks the same WS protocol the brain does.
+- [ ] **Phone↔brain handoff coordination.** Implicit today (phone stops sending when its waypoints end; brain starts when iphone_listener sees GPS at last waypoint). Decide if explicit signaling is needed (e.g. phone POSTs `/handoff` to brain).
+- [ ] OWLv2 + Qwen3-VL **GPU validation** on the 4080 — still scaffolded only.
+- [ ] **Full state machine orchestrator** in `brain/main.py`. Currently runs only the approach loop.
+- [ ] Relay (`relay/`) — Node/Express. Endpoints: `POST /reports`, `GET /reports/latest`, `POST /robot/heartbeat`, `POST /routes/apple`. Contract in [app/README.md](../app/README.md).
+- [ ] Apple Maps server API token not yet provisioned.
+- [ ] Reporter-photo cropping pipeline: brain crops at task-start time using YOLOv8n, falls back to full photo if no trash class found. Confirm vs. having Expo app crop.
+- [ ] No battery monitoring yet. No charging dock / return-to-base behavior.
 - [ ] Relay is single-instance, no auth on `/reports`. Anyone on the network can queue tasks.
-- [ ] OWLv2 target finder not yet implemented (`brain/perception/target_finder.py`). Stubbed in docs, code to be written.
-- [ ] Reporter-photo cropping pipeline: decide whether the Expo app, the relay, or the brain does the crop before running OWLv2's reference encoder. Current plan: brain crops at task-start time using the existing YOLOv8n detector, falls back to full photo if no trash class found.
+- [ ] Frame codec: MJPEG 480p@15fps is in use. Reconsider H.264 / WebRTC if bandwidth becomes an issue at 720p.

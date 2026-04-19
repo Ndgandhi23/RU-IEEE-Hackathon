@@ -14,3 +14,7 @@ pyyaml==6.0.2
 requests==2.32.3
 tqdm==4.66.5
 pytest==8.3.3
+# I/O plumbing
+websockets==16.0             # brain/io/pi_bridge + pi/motor_controller server
+fastapi==0.135.2             # brain/io/iphone_listener
+uvicorn==0.42.0              # brain/io/iphone_listener entry point

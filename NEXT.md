@@ -20,116 +20,117 @@ Date of this snapshot: **2026-04-18**.
   - Overall: 0.511
 - For the Rutgers pickup use case, bottle + can is most of what matters. Weak classes can be improved in v2 with ~200–400 extra Rutgers images per class.
 
-### Navigation scaffolding (brain-side)
-- [brain/nav/geo.py](brain/nav/geo.py) — pure-math GPS utilities (haversine, bearing, heading_error). 15 unit tests, all passing.
-- [brain/io/webcam.py](brain/io/webcam.py) — async USB webcam capture, thread-safe latest-frame access.
-- [brain/perception/detector.py](brain/perception/detector.py) — YOLO wrapper with typed `Detection` dataclass. Works with `.pt`, `.onnx`, `.engine`.
-- [tools/live_detect.py](tools/live_detect.py) — webcam → detector → boxes drawn. Has interactive mode (cv2 window) and headless `--save-dir` mode.
-- [tools/webcam_preview.py](tools/webcam_preview.py) — same, no detector.
+### Brain-side modules (all shipped, 65 unit tests passing)
+- [brain/nav/geo.py](brain/nav/geo.py) — GPS math (haversine, bearing, heading_error). 15 tests.
+- [brain/io/webcam.py](brain/io/webcam.py) — async USB webcam capture.
+- [brain/io/pi_bridge.py](brain/io/pi_bridge.py) — WebSocket client to the Pi. Sync-facing, async-under-the-hood. Auto-reconnect, stale-safe encoder/state push, command clamping. Speaks `drive`/`stop`/`reset_encoders` out, parses `state {encoders, motors, watchdog_ok}` in. 9 integration tests against a real localhost WS server.
+- [brain/io/pi_frame_source.py](brain/io/pi_frame_source.py) — MJPEG consumer for the Pi's camera stream. Drop-in Frame-API replacement for webcam.Webcam.
+- [brain/io/iphone_listener.py](brain/io/iphone_listener.py) — FastAPI listener on :8000 for iPhone GPS heartbeats. `LatestSensorState` singleton + stale checks. The brain uses this to detect "phone reached last waypoint, my turn" for the NAVIGATING → SEARCHING handoff. 9 tests.
+- [brain/perception/detector.py](brain/perception/detector.py) — YOLOv8n wrapper (kept for reporter-photo cropping; not in the live approach loop).
+- [brain/perception/servo.py](brain/perception/servo.py) — continuous servo decision. 12 tests. Currently unused by the discrete-action approach loop; kept for future smooth-control needs.
+- [brain/perception/target_finder.py](brain/perception/target_finder.py) — OWLv2 image-conditioned detector. **Scaffolded, not GPU-validated yet.**
+- [brain/perception/vlm_scout.py](brain/perception/vlm_scout.py) — Qwen3-VL-8B @ 4-bit scout. **Scaffolded, not GPU-validated yet.**
+- [brain/control/loop.py](brain/control/loop.py) — `ApproachController.step(frame) → Action`. 13 tests.
+- [brain/control/action_to_pwm.py](brain/control/action_to_pwm.py) — Action → (left, right) PWM table. 7 tests.
+- [brain/main.py](brain/main.py) — approach-phase glue loop. Wires PiFrameSource → ApproachController → PiBridge. **Not the full FSM yet** — wraps SEARCHING + APPROACHING + VERIFYING; doesn't yet coordinate handoff with the phone.
+
+### Pi-side modules (code shipped, awaiting hardware)
+- [pi/camera_streamer/](pi/camera_streamer/) — MJPEG server on :8080 from the C270. Already working.
+- [pi/motor_controller/](pi/motor_controller/) — WebSocket server on :8765 with L298N driver + quadrature encoder reader. Accepts `drive` / `stop` / `reset_encoders` from any client; broadcasts `state {encoders, motors, watchdog_ok}` at 20 Hz to all. 500 ms watchdog. Auto-falls-back to mock backends when pigpio is unavailable. **Phone and brain are both expected clients** — phone during NAVIGATING (Apple Maps waypoint following), brain during SEARCHING + APPROACHING + VERIFYING (vision-driven).
+
+### Tools
+- [tools/live_detect.py](tools/live_detect.py), [tools/webcam_preview.py](tools/webcam_preview.py) — YOLO/webcam smoke tests.
+- [tools/test_target_finder.py](tools/test_target_finder.py) — OWLv2 live webcam validation.
+- [tools/test_vlm_scout.py](tools/test_vlm_scout.py) — Qwen3-VL three-image smoke test with cold/warm latency measurement.
+- [tools/test_approach.py](tools/test_approach.py) — full hybrid pipeline on a webcam: OWLv2 + Qwen3-VL + ApproachController, Action overlaid on the frame. No hardware needed.
 
 ### Dataset pipeline
-- [ml-training/scripts/prepare_dataset.py](ml-training/scripts/prepare_dataset.py) — downloads + converts TACO.
-- [ml-training/scripts/prepare_drink_waste.py](ml-training/scripts/prepare_drink_waste.py) — Kaggle Drink Waste, remapped to our 5 classes (glass bottles dropped).
-- [ml-training/notebooks/train.ipynb](ml-training/notebooks/train.ipynb) — Colab training pipeline, end-to-end (clone → install → prep → train → save to Drive).
-- [ml-training/notebooks/eda.ipynb](ml-training/notebooks/eda.ipynb) — 17-section deep EDA (integrity, duplicates, class distribution, bbox size, co-occurrence, gallery).
-- [ml-training/notebooks/sanity.ipynb](ml-training/notebooks/sanity.ipynb) — side-by-side ground truth vs prediction on random test images.
+- [ml-training/scripts/prepare_dataset.py](ml-training/scripts/prepare_dataset.py) — TACO converter.
+- [ml-training/scripts/prepare_drink_waste.py](ml-training/scripts/prepare_drink_waste.py) — Kaggle Drink Waste remapper.
+- [ml-training/notebooks/](ml-training/notebooks/) — train.ipynb, eda.ipynb, sanity.ipynb.
 
 ---
 
 ## One-command live demo
 
 ```bash
-# on any Mac with a builtin webcam
 python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-python demo.py
+python demo.py                            # YOLO-only bottle/can demo
 ```
-
-Point the webcam at a water bottle or soda can → green/blue box with class name + confidence. Press `q` to quit, `s` to snapshot to `/tmp/`.
 
 ---
 
 ## Architecture (summary — full details in writeup/CLAUDE.md)
 
 **Two machines:**
-- **Brain desktop** (RTX 4080, 16 GB VRAM) — runs everything that isn't motor I/O: YOLOv8n obstacle detection, OWLv2 image-conditioned target finder, nav state machine, control loop, FastAPI listener for iPhone GPS. Code lives under `brain/`.
-- **Pi 3B on the robot** — drives motors, reads ultrasonics, streams C270 webcam frames. **Talks to brain over local WiFi: WebSocket on :8765 for commands/sensors, MJPEG on :8080 for frames.** No business logic on the Pi.
-- **Relay** (Node/Express, `relay/`) — shared backend for phones + brain. Not yet written.
-
-We previously considered splitting perception (4080) and nav (4070) across two desktops. Consolidated onto the single 4080 because: lower latency (no WebSocket hop between perception and control loop), simpler deploy (one process tree, one log source), and the 4080 has ~12 GB of VRAM headroom after loading both YOLOv8n and OWLv2-base.
+- **Brain desktop** (RTX 4080, 16 GB VRAM) — runs everything that isn't motor I/O: YOLOv8n obstacle detection, OWLv2 image-conditioned target finder, Qwen3-VL scout, nav control loop, FastAPI listener for iPhone GPS. Code lives under `brain/`.
+- **Pi 3B on the robot** — drives motors via L298N (WS :8765), reads quadrature encoders, streams C270 frames (MJPEG :8080). No business logic. Multi-client WS — phone and brain both connect.
+- **Phone (mounted, Expo app)** — owns NAVIGATING. Walks Apple Maps waypoints → drive cmds to Pi. Posts GPS heartbeats to brain so brain knows when to take over.
+- **Relay** (Node/Express, `relay/`) — shared backend for phones + brain. **Not yet written.**
 
 ---
 
 ## What's next (ordered by priority)
 
-### 1. Verify the YOLO model works on real-world frames (~30 min)
-Run `python demo.py`, hold up a bottle and a can, confirm detection works. If `bottle` confidence is reliably >0.8 under your lighting, the model is good. If not, flag it — we may need imgsz or conf tuning.
+### 1. GPU validation on the 4080 — **the critical path** (~1 hr)
 
-### 2. Hybrid perception + control pipeline — **scaffolded, not yet GPU-validated**
+Both perception models are scaffolded but have never actually loaded a real frame. Do these in order on the 4080:
 
-Two models, one controller:
-
-- **[brain/perception/target_finder.py](brain/perception/target_finder.py)** — fast path. OWLv2 (`google/owlv2-base-patch16`) image-conditioned detection. When it finds the target, bbox feeds the controller directly. ~25 FPS on a 4080.
-- **[brain/perception/vlm_scout.py](brain/perception/vlm_scout.py)** — slow path. Qwen3-VL-8B at 4-bit (`Qwen/Qwen3-VL-8B-Instruct`). Called only when OWLv2 returns empty. Sees reference crop + reporter's original wider photo + live frame, returns `"left"` or `"right"` with a rationale. ~1–2 Hz.
-- **[brain/control/loop.py](brain/control/loop.py)** — orchestrator. `ApproachController.step(frame) -> Action`. Action is one of `FORWARD | LEFT | RIGHT | STOP | SEARCH_LEFT | SEARCH_RIGHT`. OWLv2 every frame; if empty, queue a 15-frame burst of SEARCH rotations in the VLM's direction before asking again.
-
-Tests: 25 unit tests pass (12 servo + 13 control loop). Control loop tests mock both models, no GPU needed.
-
-Smoke test with webcam + reference image:
 ```bash
-pip install -r requirements.txt   # transformers, bitsandbytes, accelerate, Pillow
-python tools/test_target_finder.py --reference path/to/query.jpg
-# first run downloads OWLv2 weights (~300 MB)
+pip install -r requirements.txt
+python tools/test_target_finder.py --reference ~/ref.jpg
+python tools/test_vlm_scout.py --reference r.jpg --context c.jpg --live l.jpg --trials 5
+python tools/test_approach.py --reference r.jpg --context c.jpg
 ```
 
-Remaining integration work before this is demo-able:
-- Glue script that wires `Webcam` → `ApproachController` → prints/sends Actions
-- Map `Action` enum to motor PWM (simple: FORWARD=(+150,+150), LEFT=(-100,+100), STOP=(0,0), etc.) once the Pi bridge exists
-- GPU validation: load Qwen3-VL-8B on the 4080 and verify JSON output reliability
+Known gotchas are recorded in [HANDOFF.md](HANDOFF.md) § 4 — `transformers @ git+main` may have drifted, `bitsandbytes` 4-bit may need a 8-bit fallback, Qwen3-VL can emit prose around the JSON.
 
-### 3. Pi-side motor controller + streaming (new code, ~2 hr)
-Create `pi/motor_controller/main.py` on the Pi:
-- WebSocket server on :8765
-  - Accepts `{"cmd":"drive","left":<int>,"right":<int>}` (pwm ∈ [-255, 255])
-  - Accepts `{"cmd":"intake","pwm":<int>}` (pwm ∈ [0, 255])
-  - Emits `{"type":"ultrasonics","front_cm":N,"left_cm":N,"right_cm":N,"ts":<float>}` at 20Hz
-  - Watchdog: zero motors if no drive/intake in 500ms
-- MJPEG server on :8080 from C270 at 480p@15fps
-- Uses `pigpio` or `RPi.GPIO` for PWM + ultrasonics, `opencv-python` for camera
+### 2. End-to-end dress rehearsal, no robot hardware (~30 min)
 
-This requires physical wiring: H-bridge ↔ Pi GPIO, ultrasonics ↔ Pi GPIO, C270 ↔ Pi USB.
+Once GPU validation passes, the whole brain+Pi loop can be smoke-tested on a laptop:
 
-### 4. Brain-side Pi bridge (new code, ~30 min)
-[brain/io/pi_bridge.py](brain/io/pi_bridge.py) — WebSocket client to Pi, with:
-- `set_motors(left, right)` — fire and forget
-- `set_intake(pwm)` — fire and forget
-- `get_ultrasonics()` — returns latest or None if stale >500ms
-- Auto-reconnect on drop
+```bash
+# terminal 1
+python -m pi.motor_controller --mock -v
+# terminal 2 (on the 4080)
+python -m brain.main --pi-ip 127.0.0.1 --webcam 0 \
+    --reference r.jpg --context c.jpg
+```
 
-Also a frame consumer (fork of `brain/io/webcam.py` that pulls from MJPEG URL instead of cv2.VideoCapture).
+The brain connects to the mock Pi, runs the approach controller on its local webcam, and sends PWM. The mock logs every command — this validates PiBridge ↔ MotorServer end-to-end before any H-bridge exists.
 
-### 5. iPhone GPS listener (new code, ~30 min)
-[brain/io/iphone_listener.py](brain/io/iphone_listener.py) — FastAPI endpoint on :8000 that the robot iPhone POSTs `{"location":{...},"sentAt":...}` to. Maintains `LatestSensorState` singleton. Heartbeat schema in writeup/CLAUDE.md.
+### 3. Wire the physical robot (~few hrs, hardware task)
 
-### 6. State machine skeleton (~45 min)
-[brain/main.py](brain/main.py) — IDLE → PLANNING → NAVIGATING → SEARCHING → APPROACHING → INTAKING → VERIFYING → REPORTING per the state diagram in writeup/CLAUDE.md. Stub each state; wire `pi_bridge` + `iphone_listener` + `detector` + `target_finder` into the shared state.
+Pin map in [pi/motor_controller/README.md](pi/motor_controller/README.md). Once wired:
 
-### 7. Relay backend (~2 hr, can be parallel to nav work)
-`relay/` — Node/Express. Endpoints: `POST /reports`, `GET /reports/latest`, `POST /robot/heartbeat`, `POST /routes/apple` (proxies Apple Maps MapKit JS). Contract lives in [app/README.md](app/README.md). Needs an Apple Developer MapKit token in `.env`.
+```bash
+sudo systemctl enable --now pigpiod
+python3 -m pi.motor_controller -v
+```
+
+Test with `python -m brain.main --pi-ip <pi-ip> ...` using the real Pi IP. Robot should drive.
+
+### 4. Full state machine orchestrator (~2 hrs)
+
+`brain/main.py` currently runs the approach phase only. Wrap `ApproachController` in the full IDLE → PLANNING → NAVIGATING → SEARCHING → APPROACHING → INTAKING → VERIFYING → REPORTING FSM from writeup/CLAUDE.md. Use the existing `iphone_listener` + (future) relay client to drive state transitions.
+
+### 5. Relay backend (~2 hrs, Node/Express — different stack)
+
+`relay/` — still empty. Endpoints: `POST /reports`, `GET /reports/latest`, `POST /robot/heartbeat`, `POST /routes/apple` (Apple Maps MapKit JS proxy). Contract lives in [app/README.md](app/README.md). Needs an Apple Developer MapKit token in `.env`.
 
 ### Deferred (don't work on until the above is running)
-- Waypoint follower (needs relay + Apple Maps first)
-- Data v2 for wrapper/cup/paper (nice-to-have; current model is plenty for bottle/can demo)
-- VLM-based tiebreaker for ambiguous target scenes (demo has a single target — not needed)
+- Waypoint follower (blocked on relay + Apple Maps)
+- Data v2 for wrapper/cup/paper (nice-to-have; bottle/can is plenty for demo)
 
 ---
 
 ## Known blockers / decisions
 
-- **Motors not yet wired** to Pi. Blocks item 2.
-- **iPhone mount not built.** Blocks item 4.
-- **Apple Developer MapKit token not provisioned.** Blocks item 6's route planning. Can mock a route for testing.
-- **Weak classes** (cup/wrapper/paper) are the first v2 problem. For the hackathon demo, just filter to bottle+can detections at inference time if a wrapper false positive is worse than a miss.
+- **Motors not yet wired** to Pi. Blocks item 3 and the full robot demo — but items 1 and 2 unblock independently.
+- **iPhone mount not built.** Blocks the GPS/heading primary localization. Item 4 can stub it.
+- **Apple Developer MapKit token not provisioned.** Blocks item 5 and waypoint nav. Can mock a route for testing.
+- **Weak YOLO classes** (cup/wrapper/paper) are the first v2 problem. For the hackathon demo, just filter to bottle+can detections at inference time if wrapper false positives bite.
 
 ---
 
@@ -137,61 +138,65 @@ Also a frame consumer (fork of `brain/io/webcam.py` that pulls from MJPEG URL in
 
 ```
 RU-IEEE-Hackathon/
-├── NEXT.md                  # this file — current state of play
-├── CLAUDE.md                # → writeup/CLAUDE.md (full architecture)
-├── demo.py                  # one-command live webcam demo
-├── requirements.txt         # brain-side deps
-├── models/
-│   └── trash_v1.pt          # trained YOLO weights (~6MB, in git)
-├── writeup/                 # all design docs
-│   ├── CLAUDE.md            # architecture + conventions
-│   ├── nav.md               # nav design
-│   ├── trash-detection.md   # YOLO design
-│   └── ...
-├── brain/                  # code that runs on the BRAIN DESKTOP (RTX 4080)
-│   ├── nav/geo.py           # ✓ built
-│   ├── io/webcam.py         # ✓ built
-│   ├── perception/detector.py       # ✓ built (YOLOv8n for obstacles / general)
-│   ├── perception/target_finder.py  # ✓ scaffolded (OWLv2 fast path) — needs GPU validation
-│   ├── perception/vlm_scout.py      # ✓ scaffolded (Qwen3-VL-8B @4-bit slow path) — needs GPU validation
-│   ├── perception/servo.py          # ✓ built (continuous servo decision, unit-tested)
-│   ├── control/loop.py              # ✓ built (ApproachController, 13 unit tests)
-│   ├── io/pi_bridge.py      # TODO
-│   ├── io/iphone_listener.py # TODO
-│   └── main.py              # TODO (state machine)
-├── pi/motor_controller/     # TODO (runs on the Pi)
-├── relay/                   # TODO (Node/Express backend)
-├── app/                     # ✓ Expo app exists (Reporter + Robot tabs)
-├── ml-training/             # training pipeline (Colab-driven)
-│   ├── notebooks/
-│   │   ├── train.ipynb      # ✓ model shipped: runs/.../trash_v1.pt
-│   │   ├── eda.ipynb        # ✓ deep EDA
-│   │   └── sanity.ipynb     # ✓ preds vs ground truth
-│   └── scripts/
+├── NEXT.md                         # this file — current state of play
+├── HANDOFF.md                      # ordered action plan for the next session
+├── CLAUDE.md                       # → writeup/CLAUDE.md (full architecture)
+├── demo.py                         # one-command YOLO webcam demo
+├── requirements.txt                # brain-side deps
+├── models/trash_v1.pt              # trained YOLO weights (~6 MB)
+├── writeup/                        # all design docs (CLAUDE.md, nav.md, …)
+├── brain/                          # code that runs on the BRAIN DESKTOP (RTX 4080)
+│   ├── nav/geo.py                  # ✓ built
+│   ├── io/webcam.py                # ✓ built
+│   ├── io/pi_bridge.py             # ✓ built
+│   ├── io/pi_frame_source.py       # ✓ built
+│   ├── io/iphone_listener.py       # ✓ built
+│   ├── perception/detector.py      # ✓ built (YOLOv8n obstacles)
+│   ├── perception/target_finder.py # ✓ scaffolded — needs GPU validation
+│   ├── perception/vlm_scout.py     # ✓ scaffolded — needs GPU validation
+│   ├── perception/servo.py         # ✓ built (continuous, currently unused by the hybrid loop)
+│   ├── control/loop.py             # ✓ built (ApproachController)
+│   ├── control/action_to_pwm.py    # ✓ built
+│   └── main.py                     # ✓ built (approach-phase glue; full FSM still TODO)
+├── pi/
+│   ├── camera_streamer/            # ✓ MJPEG server on :8080
+│   └── motor_controller/           # ✓ WebSocket server on :8765 (code ready, needs wired hardware)
+├── relay/                          # TODO (Node/Express backend)
+├── app/                            # ✓ Expo app exists (Reporter + Robot tabs)
+├── ml-training/                    # training pipeline (Colab-driven)
 ├── tools/
-│   ├── live_detect.py       # ✓ webcam → YOLO → boxes
-│   └── webcam_preview.py    # ✓ webcam → display
-└── tests/
-    └── test_geo.py          # ✓ 15 tests passing
+│   ├── live_detect.py              # ✓ webcam → YOLO → boxes
+│   ├── webcam_preview.py           # ✓ webcam → display
+│   ├── test_target_finder.py       # ✓ OWLv2 live webcam
+│   ├── test_vlm_scout.py           # ✓ Qwen3-VL three-image smoke
+│   └── test_approach.py            # ✓ full hybrid pipeline on webcam (no hardware)
+└── tests/                          # 65 passing
+    ├── test_geo.py                 # 15
+    ├── test_servo.py               # 12
+    ├── test_loop.py                # 13
+    ├── test_action_to_pwm.py       # 7
+    ├── test_iphone_listener.py     # 9
+    └── test_pi_bridge.py           # 9 (real-WS integration, new protocol)
 ```
 
-✓ = shipped. TODO = next up.
+✓ = shipped.
 
 ---
 
 ## For the next Claude session
 
 Your most likely assignments when the user returns:
-- "run the demo" → `python demo.py`
-- "build the target finder" → item 2 above (OWLv2)
-- "build the Pi side" → item 3 above
-- "build the brain's Pi client" → item 4 above
-- "wire it all into a state machine" → items 4 + 5 + 6 together
-- "fix the cup/wrapper detection" → v2 data collection, see writeup/trash-detection.md
+- **"run the GPU validation"** → item 1 above, three tools in sequence.
+- **"dress rehearse the whole loop on my laptop"** → item 2 above.
+- **"the robot is wired, let's go"** → item 3 above.
+- **"wrap the approach loop in the full state machine"** → item 4 above.
+- **"build the relay"** → item 5 above. Different stack (Node/TS); check Expo app's `README.md` for the contract.
+- **"fix the cup/wrapper detection"** → v2 data collection, see writeup/trash-detection.md.
 
-**Don't** re-train the YOLO model unless the user explicitly asks — the current weights are good for bottle+can as the obstacle/general detector.
-**Don't** work on TensorRT export — the brain is an RTX 4080, `.pt` weights are plenty fast.
+**Don't** re-train the YOLO model unless explicitly asked.
+**Don't** rebuild OWLv2 or Qwen3-VL from scratch — used off-the-shelf from HuggingFace.
+**Don't** work on TensorRT export — RTX 4080, `.pt` weights are fast enough.
 **Don't** expand Pi responsibilities beyond motor/sensor/camera proxy.
-**Don't** rebuild OWLv2 from scratch or fine-tune it — it's used off-the-shelf from HuggingFace; only swap models if field testing exposes a problem.
+**Don't** bypass the state machine (once it exists) — new behaviors are new states, not ad-hoc motor commands.
 
 Update this file (`NEXT.md`) whenever the priority list shifts.
