@@ -6,14 +6,14 @@ Workflow doc for the trash detection model. Lives in `ml-training/`. Read before
 
 A YOLOv8n object detector that finds litter in outdoor camera frames. Same weights are used in two places:
 
-- **On the robot** (Jetson): `jetson/perception/detector.py` loads the TensorRT engine for real-time inference during the SEARCHING/APPROACHING/VERIFYING states.
+- **On the brain desktop** (RTX 4080): `brain/perception/detector.py` loads the `.pt` weights directly for real-time inference during the SEARCHING/APPROACHING/VERIFYING states.
 - **On the server**: `server/ml/classifier.py` loads the .pt or .onnx for upload validation and trash classification.
 
 Single source of truth. Don't train two separate models for these two jobs.
 
 ## Class List (Canonical)
 
-Defined in `classes.yaml`. **Every change here cascades through the codebase.** Update `data.yaml`, retrain the model, re-export TensorRT, update the Jetson and server code that filters by class.
+Defined in `classes.yaml`. **Every change here cascades through the codebase.** Update `data.yaml`, retrain the model, update the brain and server code that filters by class.
 
 Current classes:
 
@@ -35,7 +35,7 @@ If you change this list, update:
 1. `classes.yaml`
 2. `data.yaml` (regenerate from classes.yaml)
 3. `CLAUDE.md` model section
-4. `jetson/perception/detector.py` class filter constants
+4. `brain/perception/detector.py` class filter constants
 5. `server/ml/classifier.py` class mapping
 
 ## Strategy: Why Fine-Tune at All
@@ -56,7 +56,7 @@ ml-training/
 ├── TRAINING.md                       # this file
 ├── classes.yaml                      # canonical class list
 ├── data.yaml                         # YOLO dataset config (generated from classes.yaml)
-├── requirements.txt                  # heavy training deps, separate from Jetson runtime
+├── requirements.txt                  # heavy training deps, separate from brain runtime
 ├── data/                             # GITIGNORED — see "Getting the Data" below
 │   ├── README.md                     # describes how to obtain/regenerate
 │   ├── images/{train,val,test}/
@@ -81,7 +81,7 @@ ml-training/
 
 ## Environment Setup
 
-Training is heavy. Use a separate venv from the Jetson runtime.
+Training is heavy. Use a separate venv from the brain runtime.
 
 ```bash
 cd ml-training
@@ -105,9 +105,7 @@ pyyaml
 **Pin Ultralytics version.** Their API changes between minor versions and silently breaks training scripts.
 
 ### Where to train
-- **Best:** workstation/laptop with NVIDIA GPU (RTX 30xx or better).
-- **Acceptable:** Google Colab T4 (free tier — ~2 hours for 100 epochs on small dataset).
-- **Don't:** train on the Jetson Orin Nano. It can run inference fast but training is slow and you'll cook the device.
+**Colab.** Current `trash_v1.pt` was trained on Colab (T4/A100 free tier, ~2 hours for 100 epochs). Stick with Colab — the 4080 brain is reserved for robot inference, not training.
 
 ## Getting the Data
 
@@ -233,65 +231,23 @@ Log each iteration in `models/MODEL_LOG.md`:
 - Deployed: yes
 ```
 
-## Exporting to TensorRT (for the Jetson)
-
-**Run this ON THE JETSON.** TensorRT engines are tied to the specific GPU + JetPack version they're built on. An engine built on a desktop RTX won't load on the Orin Nano.
-
-```bash
-# on the Jetson
-cd ml-training
-python scripts/export_tensorrt.py models/trash_v2.pt
-```
-
-Which is roughly:
-```python
-from ultralytics import YOLO
-model = YOLO('models/trash_v2.pt')
-model.export(format='engine', half=True, device=0, imgsz=640)
-# produces models/trash_v2.engine
-```
-
-**Verify performance:**
-```python
-import time
-from ultralytics import YOLO
-model = YOLO('models/trash_v2.engine')
-for _ in range(10): model.predict('test.jpg', verbose=False)  # warmup
-start = time.time()
-for _ in range(100): model.predict('test.jpg', verbose=False)
-print(f"FPS: {100/(time.time()-start):.1f}")
-```
-
-Targets on Orin Nano:
-- 30+ FPS at 640x640 FP16: good
-- 15-30 FPS: acceptable
-- <15 FPS: drop input size to 416 or 320 and re-export
-
 ## Model Versioning
 
-`models/` is Git LFS tracked for `*.pt` and `*.engine`. Setup once per clone:
-```bash
-git lfs install
-git lfs track "ml-training/models/*.pt" "ml-training/models/*.engine"
-```
-
-Naming convention: `trash_v<N>.pt` and `trash_v<N>.engine`. Bump N for any retraining that gets deployed. Don't reuse names — old runs stay around for rollback.
+Naming convention: `trash_v<N>.pt`. Bump N for any retraining that gets deployed. Don't reuse names — old runs stay around for rollback.
 
 `models/MODEL_LOG.md` is the human-readable history. Update on every commit to `models/`.
 
-The Jetson and server code reference a fixed model version (e.g., `trash_v2.engine`) — they don't auto-pick the latest. Bumping the deployed version is a deliberate code change.
+The brain and server code reference a fixed model version (e.g., `trash_v1.pt`) — they don't auto-pick the latest. Bumping the deployed version is a deliberate code change.
 
 ## What Not to Do
 
-- **Don't try YOLOv9, v10, v11 yet.** v8n is mature, well-documented, has the best Jetson tooling.
+- **Don't try YOLOv9, v10, v11 yet.** v8n is mature and well-documented; we have it working.
 - **Don't train multiple model sizes "to compare."** Train v8n. Done.
 - **Don't add classes you can't physically pick up.** Bloats the model, creates UX problems (robot reports trash it can't grab).
 - **Don't collect data in conditions you won't operate in.** No night, no rain.
 - **Don't change the augmentation pipeline without a measured reason.** Ultralytics defaults are tuned for object detection.
 - **Don't tune hyperparameters before tuning the dataset.** Data > hyperparams, always.
-- **Don't train on the Jetson.** Slow, cooks the device, no benefit.
 - **Don't commit raw images to git.** They go in `data/`, which is gitignored. Document in `data/README.md` how to obtain them.
-- **Don't build TensorRT engines on your laptop.** They won't load on the Jetson.
 
 ## Risks
 
@@ -322,16 +278,6 @@ python scripts/visualize_failures.py runs/train/trash_v1/weights/best.pt
 cp runs/train/trash_v1/weights/best.pt models/trash_v1.pt
 git add models/trash_v1.pt && git commit -m "ml: trash detector v1, mAP 0.65"
 ```
-
-On the Jetson, after pulling:
-```bash
-cd ml-training
-python scripts/export_tensorrt.py models/trash_v1.pt
-git add models/trash_v1.engine && git commit -m "ml: export trash_v1 to TensorRT"
-git push
-```
-
-Then update the Jetson code to point at the new engine version.
 
 ## Open Questions / TODO
 

@@ -16,10 +16,10 @@ Two phones are in play:
 
 The robot's compute is **distributed across two machines** communicating over local WiFi:
 
-- **Brain machine** — a developer laptop (Mac, for the hackathon prototype) that runs YOLO inference, nav logic, and the state machine. Not physically on the robot for the prototype. In a future deployment, this role is taken over by a Jetson Orin Nano mounted on the robot, running the same code unchanged.
+- **Brain machine** — a desktop with an **NVIDIA RTX 4080** (16 GB VRAM) that runs all heavy compute: YOLO obstacle detection, OWLv2 image-conditioned target finding, the nav control loop, and the state machine. Not physically on the robot — operates remotely over local WiFi. One machine, one process tree.
 - **Pi 3B (on the robot)** — the edge node. Drives motors, reads ultrasonics, runs the intake motor, **and streams C270 webcam frames to the brain machine over WebSocket / MJPEG**. Has no logic of its own — just executes commands and forwards sensor data.
 
-All heavy compute (YOLO, nav math, state machine) runs on the brain. The Pi is a thin I/O proxy. This keeps the Pi dumb and lets us iterate on the brain side (fast laptop dev loop) without touching on-robot hardware.
+All heavy compute runs on the brain. The Pi is a thin I/O proxy. This keeps the Pi dumb and lets us iterate on the brain side without touching on-robot hardware. Previously we'd planned a second desktop (4070) for nav; we consolidated onto the 4080 because a single machine simplifies deployment, removes a WebSocket hop, and the 4080 has plenty of headroom for both perception models plus CPU-bound nav code.
 
 A lightweight **relay** (Node/Express, under `relay/`) is the only shared backend. It stores reports, exposes the latest target, accepts robot heartbeats, and proxies **Apple Maps routing** for walking directions. Both the phones and the brain machine talk to it over HTTPS. No OSM graph, no custom path planner — routing is delegated to Apple Maps, and nav's job is to follow the returned waypoints.
 
@@ -27,9 +27,8 @@ A lightweight **relay** (Node/Express, under `relay/`) is the only shared backen
 
 | Component | Purpose |
 |---|---|
-| Brain laptop (MacBook for hackathon) | Runs YOLO, nav loop, state machine. Receives camera frames + ultrasonics from the Pi over WiFi; sends motor commands back. Not on the robot — operates remotely over local WiFi. |
+| Brain desktop (RTX 4080, 16 GB VRAM) | Runs all heavy compute: YOLOv8n obstacle detection, OWLv2 image-conditioned target finder, nav control loop, state machine, FastAPI listener for iPhone GPS. Not on the robot — operates remotely over local WiFi. |
 | Raspberry Pi 3B (on robot) | Edge node. Drives motors via H-bridge, reads ultrasonics, runs intake motor, streams webcam frames and sensor data to the brain machine over WebSocket / MJPEG. No business logic. |
-| Jetson Orin Nano (optional, future) | Upgrade path. Once the prototype works end-to-end over WiFi, the Jetson takes the brain's role for a self-contained robot. Runs the same Python code. TensorRT-exported model for faster inference. |
 | Robot phone (iPhone, mounted) | GPS + heading source. Posts heartbeats directly to the brain machine over local WiFi, OR through the relay. |
 | Reporter phone (iPhone, handheld) | Runs the Expo app's Reporter tab: uploads trash photos + GPS to the relay. Not part of the robot. |
 | Logitech C270 webcam | USB to the Pi. 720p fixed-focus. Frames streamed over WiFi to the brain machine. Used for visual final approach + obstacle detection. |
@@ -47,6 +46,7 @@ A lightweight **relay** (Node/Express, under `relay/`) is the only shared backen
 - **iPhone compass is sensitive to motor magnetic fields.** Always mount on a stalk well above the chassis. Recalibrate (figure-8 motion) after any physical change.
 - **The Pi has no logic.** Don't add behavior to the Pi. It drives motors, reads sensors, streams frames. Every decision lives on the brain machine.
 - **C270 fails in low light and rain.** Demo and test in daylight, dry conditions.
+- **Brain is a single point of failure.** If the 4080 crashes, the robot halts (Pi watchdog zeros motors after 500ms). Keep the brain on wired power, not running other heavy workloads during a run.
 
 ## Architecture
 
@@ -67,9 +67,9 @@ A lightweight **relay** (Node/Express, under `relay/`) is the only shared backen
       |                |                  |
       v (GPS heartbeat over local WiFi, HTTP)
  ┌─────────────────────────────────┐
- │       Brain machine (Mac)        │
- │  YOLO + nav + state machine      │
- │  Runs code under jetson/         │
+ │   Brain desktop (RTX 4080)       │
+ │  YOLOv8 + OWLv2 + nav + FSM      │
+ │  Runs code under brain/         │
  └────┬──────────────────▲──────────┘
       │ motor cmds        │ frames + ultrasonics
       │ (WebSocket JSON)  │ (MJPEG / WebSocket)
@@ -88,7 +88,7 @@ A lightweight **relay** (Node/Express, under `relay/`) is the only shared backen
 
 The Pi is an I/O proxy. The brain does all decision-making. The relay coordinates tasks across devices. Apple Maps is the path planner.
 
-**The `jetson/` folder name is historical** — the code in it runs on the brain machine (Mac for prototype). We kept the name to match CLAUDE.md's original layout. When the physical Jetson is added later, the same code runs there unchanged.
+The `brain/` folder holds everything that runs on the brain desktop (RTX 4080): perception (YOLOv8n + OWLv2), nav, state machine, and I/O clients.
 
 ## Repo Layout
 
@@ -102,7 +102,7 @@ trash-robot/
 │   ├── deliverables.md        # Deliverables checklist
 │   ├── nav.md                 # Navigation design
 │   └── trash-detection.md     # YOLO detector design
-├── jetson/                    # Code that runs on the BRAIN MACHINE (Mac now, Jetson later).
+├── brain/                    # Code that runs on the brain desktop (RTX 4080).
 │   ├── nav/                   # Navigation: localization, waypoint follower, control loop, avoidance
 │   ├── perception/            # YOLO inference, visual servoing
 │   ├── io/                    # iPhone listener, Pi bridge (WebSocket client), frame stream consumer
@@ -120,7 +120,7 @@ trash-robot/
 │   ├── data/                  # TACO + custom Rutgers photos
 │   ├── notebooks/             # Training + EDA + sanity notebooks
 │   ├── scripts/               # prepare_dataset.py, train.py, evaluate.py, prepare_drink_waste.py
-│   └── models/                # Exported weights (.pt now; .engine later for Jetson)
+│   └── models/                # Trained weights (.pt — runs directly on the RTX 4080)
 ├── tools/
 │   ├── webcam_preview.py      # Live webcam preview (interactive or --save-dir headless)
 │   ├── live_detect.py         # Live YOLO inference on webcam
@@ -171,7 +171,7 @@ All project docs live in `writeup/`. The root `CLAUDE.md` is a symlink so Claude
 - If `EXPO_PUBLIC_API_BASE_URL` is unset, the app falls back to in-memory mock mode. Useful for same-device UI testing only.
 - Reporter tab: `POST /reports` (multipart — photo file + `metadata` JSON blob).
 - Robot tab: `POST /robot/heartbeat` on a timer + `POST /routes/apple` to fetch a walking route.
-- Heartbeat schema (must stay in sync with `relay/` and `jetson/io/iphone_listener.py`):
+- Heartbeat schema (must stay in sync with `relay/` and `brain/io/iphone_listener.py`):
   ```json
   {"location": {"latitude": 40.5, "longitude": -74.4,
                 "accuracy": 4.8, "timestamp": "2026-04-18T16:32:00.000Z"},
@@ -224,44 +224,52 @@ Every state transition is logged. Every state has a max-duration timeout that dr
 
 ## Key Modules and Their Contracts
 
-### `jetson/io/iphone_listener.py`
+### `brain/io/iphone_listener.py`
 - Source of the robot's current GPS + heading. The robot phone posts `{location, sentAt}` directly to a FastAPI endpoint the brain machine exposes on port 8000 over local WiFi (lower latency than polling the relay).
 - Maintains a thread-safe `LatestSensorState` singleton.
 - `LatestSensorState.get() -> SensorReading | None` returns the most recent reading, or None if stale (>2s).
 
-### `jetson/io/pi_bridge.py`
+### `brain/io/pi_bridge.py`
 - WebSocket client to the Pi's port 8765. Reconnects automatically on disconnect.
 - `PiBridge.set_motors(left: int, right: int)` — pwm ∈ [-255, 255]. Non-blocking; queues the JSON message.
 - `PiBridge.set_intake(pwm: int)` — pwm ∈ [0, 255]. Non-blocking.
 - `PiBridge.get_ultrasonics() -> Ultrasonics` — returns latest reading from the Pi's push stream, or None if stale (>500ms).
 - Connection state (`is_connected`) is observable; loop exits cleanly when the Pi is unreachable.
 
-### `jetson/io/webcam.py`
-- Async capture. On the brain machine (Mac), opens a local webcam (builtin cam or direct USB). On future Jetson deployment, opens the on-robot C270.
+### `brain/io/webcam.py`
+- Async capture. On the brain desktop, opens a local webcam (builtin or USB) for development.
 - **For the prototype with Pi on the robot, this module is replaced by a frame consumer that reads from `http://<pi-ip>:8080/stream.mjpg` instead.** Same `Frame` dataclass, different source.
 
-### `jetson/nav/geo.py`
+### `brain/nav/geo.py`
 - Pure functions, no state, fully unit-tested.
 - `haversine(lat1, lon1, lat2, lon2) -> float` returns meters.
 - `bearing(lat1, lon1, lat2, lon2) -> float` returns degrees [0, 360).
 - `heading_error(target_bearing, current_heading) -> float` returns degrees [-180, 180].
 
-### `jetson/nav/waypoint_follower.py`
+### `brain/nav/waypoint_follower.py`
 - Consumes the Apple Maps route returned by the relay's `/routes/apple`.
 - `load_route(route)` takes `{distanceMeters, durationSeconds, polyline, steps[]}` and converts to an ordered list of `LatLon` waypoints.
 - `current_target() -> LatLon` returns the active waypoint; advances when within `WAYPOINT_ADVANCE_M`.
 - No path planning. Apple Maps is the planner. This module just walks the waypoint list.
 
-### `jetson/nav/control_loop.py`
+### `brain/nav/control_loop.py`
 - Runs at 10Hz **on the brain machine**. Reads state, ultrasonics (pushed from Pi), current waypoint. Sends motor commands back down to the Pi over WebSocket.
 - Layered: reactive avoidance overrides goal-seeking when ultrasonics trigger.
 - All control gains (`KP_TURN`, `MAX_FWD`, `ARRIVAL_THRESHOLD_M`, etc.) live at the top of the file as constants.
 
-### `jetson/perception/detector.py`
-- Loads YOLO weights at startup. On the brain machine, `.pt` weights load directly via Ultralytics (fast enough on Mac M-series or any laptop GPU). On a future Jetson, swap to a TensorRT `.engine` export for speed.
-- Async detection thread pulls webcam frames (from Mac cam or Pi MJPEG stream), runs inference, pushes results to `LatestDetections`.
+### `brain/perception/detector.py`
+- Loads YOLOv8n weights (`models/trash_v1.pt`) at startup. On the RTX 4080 brain, `.pt` weights load directly via Ultralytics and run at 100+ FPS.
+- Async detection thread pulls webcam frames (from the Pi's MJPEG stream, or a local webcam during development), runs inference, pushes results to `LatestDetections`.
 - `LatestDetections.get(class_filter: str | None, min_conf: float) -> list[Detection]`.
-- Target: 15+ FPS at 640x480 on brain. Don't add inference to the control loop thread.
+- **Role:** during NAVIGATING, this provides general-purpose detection for Job 2 obstacle avoidance (person, bicycle, car, etc.). During SEARCHING/APPROACHING/VERIFYING the target finder (below) takes over as the primary CV source.
+- Don't add inference to the control loop thread.
+
+### `brain/perception/target_finder.py`
+- Loads **OWLv2** (`google/owlv2-base-patch16-ensemble` from HuggingFace) — image-conditioned open-vocabulary detector, ~155M params, ~300 MB fp16, ~25–30 FPS at 768×768 on an RTX 4080.
+- Entry point accepts a **reference image** (the reporter's trash photo, cropped) at task-start time. Runs the image encoder once and caches the resulting query embedding for the lifetime of the task.
+- Per-frame API: `TargetFinder.detect(frame: np.ndarray) -> list[Detection]` returning bounding boxes scored by cosine similarity to the reference embedding.
+- **Role:** primary CV source during SEARCHING, APPROACHING, and VERIFYING. Output shape matches `Detection` so it's a drop-in for the visual servoing controller in `perception/servo.py`.
+- Demo assumption: single target in scene, no lookalikes — we just take the highest-scoring box above `TARGET_MIN_SIM`. See [nav.md](nav.md) for the full flow and failure modes.
 
 ### `pi/motor_controller/` (on the Pi)
 - Python script: opens WebSocket server on 8765, MJPEG server on 8080.
@@ -289,7 +297,9 @@ These live in code but are reproduced here so you know where to look. If you cha
 | `GPS_ACCURACY_REJECT_M` | `nav/localization.py` | 20.0 | Refuse to act on iPhone readings worse than this. |
 | `GPS_STALENESS_S` | `nav/localization.py` | 2.0 | Reject GPS readings older than this. |
 | `OBSTACLE_STOP_CM` | `nav/avoidance.py` | 60 | Front ultrasonic threshold for reactive avoidance. |
-| `MIN_DETECTION_CONF` | `perception/servo.py` | 0.5 | YOLO confidence threshold during visual approach. |
+| `MIN_DETECTION_CONF` | `perception/servo.py` | 0.5 | YOLO confidence threshold for non-target classes (obstacles). |
+| `TARGET_MIN_SIM` | `perception/target_finder.py` | 0.3 | OWLv2 image-similarity threshold for the target. Lower if the reference photo and live view differ in lighting/scale. |
+| `OWLV2_INPUT_SIZE` | `perception/target_finder.py` | 768 | OWLv2 input resolution. 768 is the sweet spot for accuracy vs. FPS on a 4080. |
 | `APPROACH_BOX_FILL` | `perception/servo.py` | 0.4 | Stop driving when target bbox height fills this fraction of frame. |
 | `WAYPOINT_ADVANCE_M` | `nav/waypoint_follower.py` | 2.0 | Switch to the next waypoint when within this distance. |
 | `PI_LINK_TIMEOUT_S` | `io/pi_bridge.py` | 2.0 | Fail the run if WebSocket to Pi is silent for this long. |
@@ -297,7 +307,7 @@ These live in code but are reproduced here so you know where to look. If you cha
 
 ## Testing
 
-- Unit tests for `jetson/nav/geo.py` are mandatory. Use known lat/lon pairs from Google Maps as ground truth.
+- Unit tests for `brain/nav/geo.py` are mandatory. Use known lat/lon pairs from Google Maps as ground truth.
 - Integration tests use the replay tool: feed logged sensor data into the nav loop offline, assert expected motor commands.
 - **Smoke-test the WebSocket link** before every field session: `python tools/ping_pi.py <pi-ip>` should round-trip < 200ms.
 - Field testing protocol: always verify the iPhone is streaming GPS and the Pi is streaming frames + ultrasonics before powering motors.
@@ -314,7 +324,8 @@ These live in code but are reproduced here so you know where to look. If you cha
 - **Relay + brain are single points of failure.** If either is down, nothing works.
 - **Apple Maps routes follow pedestrian paths, not campus shortcuts.** If a route sends the robot across a grass quad, the waypoint list won't include the quad.
 - **Apple Maps MapKit requires a trusted environment.** Server-side MapKit JS needs a valid Apple Developer token; it lives in the relay's `.env`. Never commit it.
-- **Ultralytics on Jetson (future).** When we do port to Jetson, expect pain. Pin versions per the JetPack compatibility matrix.
+- **OWLv2 domain shift.** The reporter photo is typically taken 30cm away in good light; the live C270 view is 1–3m away in variable light. Cosine similarity drops noticeably. If misses are frequent, lower `TARGET_MIN_SIM` rather than switching models. Test-time augmentation (horizontal flip of the reference) helps marginally.
+- **OWLv2 small-object recall.** At 3m, a bottle is ~20 pixels tall on a C270. OWLv2-base handles this but not great. Mitigation: drive slowly on approach and re-query continuously, the bbox grows as the robot closes in.
 
 ## How to Run (development — Mac as brain)
 
@@ -338,19 +349,18 @@ cd pi/motor_controller
 python3 main.py                          # opens WS :8765 and MJPEG :8080
 ```
 
-On your Mac (same WiFi as the Pi):
+On the brain desktop (RTX 4080, same WiFi as the Pi):
 ```bash
-# download trained weights from Drive to ~/weights/trash_v1_best.pt
-cd ml-training
+# weights live in repo: models/trash_v1.pt (YOLOv8n for obstacle detection)
+# OWLv2 weights are pulled automatically from HuggingFace on first run (~300 MB)
 source venv/bin/activate
-cd ..
-python -m jetson.io.iphone_listener &    # FastAPI on :8000 for iPhone heartbeats
-python -m jetson.main --pi-ip <pi-ip> --weights ~/weights/trash_v1_best.pt
+python -m brain.io.iphone_listener &    # FastAPI on :8000 for iPhone heartbeats
+python -m brain.main --pi-ip <pi-ip> --yolo-weights models/trash_v1.pt
 ```
 
 For a standalone webcam smoke-test (no Pi, no robot):
 ```bash
-python tools/live_detect.py --weights ~/weights/trash_v1_best.pt
+python tools/live_detect.py --weights models/trash_v1.pt
 ```
 
 For offline replay:
@@ -364,7 +374,7 @@ python tools/replay.py logs/2026-04-18T14-00-00.jsonl
 - **Don't bypass the state machine.** New behaviors are new states or new transitions, not ad-hoc threads firing motor commands.
 - **Don't trust GPS without checking accuracy.** Every GPS read should be paired with an `h_accuracy_m` check.
 - **Don't add inference to the control loop thread.** Perception runs in its own thread/process, control loop reads cached results.
-- **Don't change the relay contract in one place.** The heartbeat, report, and route schemas are shared across `app/`, `relay/`, and `jetson/io/iphone_listener.py`. Update all three in the same commit.
+- **Don't change the relay contract in one place.** The heartbeat, report, and route schemas are shared across `app/`, `relay/`, and `brain/io/iphone_listener.py`. Update all three in the same commit.
 - **Don't add a custom path planner.** Apple Maps via the relay is the planner. If it gives a bad route, sanity-check and tweak *inputs* (origin, snapping); don't reinvent routing.
 - **When tuning control gains, change one constant at a time** and log the effect.
 - **Don't block the brain on the Pi link.** All sends should be fire-and-forget; reads from the Pi should return stale-safe defaults when no data has arrived recently.
@@ -383,4 +393,5 @@ python tools/replay.py logs/2026-04-18T14-00-00.jsonl
 - [ ] No battery monitoring yet. Robot can run until the battery dies mid-task.
 - [ ] No charging dock / return-to-base behavior.
 - [ ] Relay is single-instance, no auth on `/reports`. Anyone on the network can queue tasks.
-- [ ] Future: port to Jetson Orin Nano, export YOLO to TensorRT `.engine`, replace Pi MJPEG stream with direct Jetson camera capture.
+- [ ] OWLv2 target finder not yet implemented (`brain/perception/target_finder.py`). Stubbed in docs, code to be written.
+- [ ] Reporter-photo cropping pipeline: decide whether the Expo app, the relay, or the brain does the crop before running OWLv2's reference encoder. Current plan: brain crops at task-start time using the existing YOLOv8n detector, falls back to full photo if no trash class found.

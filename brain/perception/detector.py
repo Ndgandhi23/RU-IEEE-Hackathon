@@ -1,8 +1,7 @@
 """YOLO inference wrapper. Loads the trained trash model once; exposes a typed detect() call.
 
-The heavy TensorRT-on-Jetson work happens later (export_tensorrt.py). This module accepts
-any format Ultralytics can load (.pt, .onnx, .engine), so the same code runs on laptop with
-.pt and on Jetson with .engine.
+Accepts any format Ultralytics can load (.pt, .onnx, .engine). On the RTX 4080 brain we use
+.pt directly — the 4080 runs YOLOv8n at 100+ FPS with no export step needed.
 """
 from __future__ import annotations
 

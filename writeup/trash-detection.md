@@ -12,8 +12,8 @@ Non-goals:
 - Semantic segmentation of trash. A bbox is enough for visual servoing.
 - Running on the phone. The robot phone is a sensor, not a compute node.
 
-Target performance on the **brain machine** (Mac laptop for the hackathon prototype; Jetson Orin Nano in a future self-contained deployment):
-- **15+ FPS** at 640×480. On a Mac M-series this is easy with `.pt`. On the Jetson, requires TensorRT FP16 export (`.engine`).
+Target performance on the **brain desktop** (RTX 4080):
+- **15+ FPS** at 640×480. With `.pt` weights on a 4080 this hits 100+ FPS — well above the control loop's 10 Hz needs.
 - **Recall ≥ 0.85** at confidence 0.5 on a held-out Rutgers test set.
 - **Precision ≥ 0.7** at the same threshold. Missing trash (low recall) is worse than a brief false-positive chase (low precision); we tune to favor recall.
 
@@ -24,7 +24,7 @@ Recommending **YOLO11n** (nano) as the starting point, with the option to move t
 Why:
 - Well-documented, easy training pipeline in Python, trivial ONNX/TensorRT export.
 - Pretrained weights on COCO available — transfer learning headstart.
-- Single-stage detector. Fast. Runs at 30+ FPS on Jetson Orin Nano in FP16.
+- Single-stage detector. Fast. Runs at 100+ FPS on an RTX 4080 with `.pt` weights.
 - Ultralytics CLI makes fine-tuning a one-liner.
 
 What we're *not* doing and why:
@@ -100,7 +100,7 @@ yolo train model=runs/trash/taco_finetune/weights/best.pt \
            project=runs/trash name=rutgers_finetune
 ```
 
-Training runs on Colab (A100/T4) per [ml-training/TRAINING.md](../ml-training/TRAINING.md), not on the brain machine. Inference runs on the brain machine at runtime (Mac for prototype, Jetson later).
+Training runs on Colab (A100/T4) per [ml-training/TRAINING.md](../ml-training/TRAINING.md). Inference runs on the brain desktop (RTX 4080) at runtime.
 
 ### Hyperparameters to touch (and nothing else)
 
@@ -124,7 +124,7 @@ Two datasets matter:
 Metrics:
 - **mAP@50** — primary. Target: >0.7 on Rutgers.
 - **Recall@conf=0.5** — secondary. We favor recall. Target: >0.85.
-- **FPS on the brain machine** (Mac `.pt` or future Jetson `.engine`). Target: >15 at 640×480.
+- **FPS on the brain desktop** (RTX 4080, `.pt`). Target: >15 at 640×480 (easily exceeded; 4080 hits 100+).
 
 Failure modes to explicitly test:
 - Trash partially occluded by grass.
@@ -135,44 +135,22 @@ Failure modes to explicitly test:
 
 ## Deployment
 
-### On the brain machine (Mac — current prototype)
-
-Load the trained `.pt` directly via Ultralytics. No export step required.
+Load the trained `.pt` directly via Ultralytics on the brain desktop. No export step required — an RTX 4080 runs YOLOv8n at 100+ FPS.
 
 ```python
 from ultralytics import YOLO
-model = YOLO("trash_v1_best.pt")
+model = YOLO("models/trash_v1.pt")
 results = model.predict(frame)
 ```
 
-`jetson/perception/detector.py` already does this — the folder name is historical, the code runs on the Mac for the prototype.
-
-### On a future Jetson (self-contained robot)
-
-Export to TensorRT once the `.pt` converges:
-
-```bash
-# Export to ONNX (can run anywhere)
-yolo export model=best.pt format=onnx imgsz=640 opset=12
-
-# On the Jetson: convert ONNX to TensorRT engine
-/usr/src/tensorrt/bin/trtexec \
-    --onnx=best.onnx \
-    --saveEngine=ml-training/models/yolo_trash.engine \
-    --fp16 \
-    --workspace=4096
-```
-
-FP16 is the right tradeoff on Orin Nano — ~2× speedup vs FP32 with negligible accuracy loss. INT8 quantization gives another 2× but needs a calibration dataset; skip until needed.
-
-**The same `detector.py` loads `.pt` or `.engine`** — Ultralytics handles both formats. No code change when we switch.
+`brain/perception/detector.py` already does this.
 
 ## Decisions to make before starting
 
 1. **Binary vs. multi-class** → recommend binary (Option A).
-2. **YOLO11n vs. YOLO11s** → start with `n`. If Jetson FPS is fine AND `n` underperforms, bump to `s`.
+2. **YOLO11n vs. YOLO11s** → start with `n`. Bump to `s` only if accuracy isn't there; FPS on the 4080 won't be the bottleneck.
 3. **Who collects Rutgers data and when** → needs to happen *before* the demo, not during. A half-day walk with a phone + 100 pieces of staged litter covers it.
-4. **Where do the model weights live** → `ml-training/models/yolo_trash.engine` (per CLAUDE.md). The `.pt` stays in the training run folder; only the `.engine` ships to the robot. Don't commit .engine files >100MB.
+4. **Where do the model weights live** → `models/trash_v1.pt` in the repo root (small enough to commit — ~6 MB). Training runs output to `ml-training/runs/`; promote to `models/` when a new version is blessed.
 5. **Labeling tool** → Roboflow (fast, web UI, free tier). Label Studio if we want to stay offline.
 
 ## Staged build plan
@@ -185,12 +163,11 @@ Each stage is a checkpoint. Don't move to the next until the current one passes 
 | B | Trained on TACO, binary | [ml-training/models/yolo_taco.pt](../ml-training/models/yolo_taco.pt) | mAP@50 >0.5 on TACO test split |
 | C | ~200 labeled Rutgers photos in hand | [ml-training/data/rutgers/](../ml-training/data/rutgers/) | Roboflow export in YOLO format, train/val/test split |
 | D | Fine-tuned on Rutgers | [ml-training/models/yolo_trash.pt](../ml-training/models/yolo_trash.pt) | mAP@50 >0.7 on Rutgers test split |
-| E | Running on brain machine (Mac) with `.pt` | [jetson/perception/detector.py](../jetson/perception/detector.py) | Live webcam detection at 15+ FPS via `tools/live_detect.py` |
-| F | Frames flowing from Pi MJPEG → brain detector | new frame-consumer in `jetson/io/` | Point Pi at a bottle from the room next door; detections show up on the Mac |
-| G | Integrated into nav state machine | [jetson/main.py](../jetson/main.py) | In SEARCHING, YOLO detections trigger state transition to APPROACHING |
-| H | (future) Exported to TensorRT for on-robot Jetson | [ml-training/models/yolo_trash.engine](../ml-training/models/yolo_trash.engine) | Benchmark shows 15+ FPS on Orin Nano |
+| E | Running on brain desktop (RTX 4080) with `.pt` | [brain/perception/detector.py](../brain/perception/detector.py) | Live webcam detection at 15+ FPS via `tools/live_detect.py` |
+| F | Frames flowing from Pi MJPEG → brain detector | new frame-consumer in `brain/io/` | Point Pi at a bottle from the room next door; detections show up on the brain desktop |
+| G | Integrated into nav state machine | [brain/main.py](../brain/main.py) | In SEARCHING, YOLO detections trigger state transition to APPROACHING |
 
-Stages A–E are laptop work. F needs the Pi streaming camera frames. G needs the full link (iPhone + Pi + relay) up. H is deferred until we swap the brain role from Mac to Jetson.
+Stages A–E are desktop work. F needs the Pi streaming camera frames. G needs the full link (iPhone + Pi + relay) up.
 
 ## Why NOT
 

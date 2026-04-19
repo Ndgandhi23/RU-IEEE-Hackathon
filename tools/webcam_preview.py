@@ -1,4 +1,4 @@
-"""Webcam preview. Run on Mac (builtin cam) or Jetson (C270 via USB).
+"""Webcam preview. Run on the brain desktop (builtin/USB cam) or dev laptop.
 
 Two modes:
 - Interactive (default): live preview window, requires a display (`cv2.imshow`).
@@ -19,7 +19,7 @@ from pathlib import Path
 import cv2
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from jetson.io.webcam import Webcam
+from brain.io.webcam import Webcam
 
 
 def run_interactive(cam: Webcam) -> None:

@@ -16,8 +16,8 @@ from pathlib import Path
 import cv2
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from jetson.io.webcam import Webcam
-from jetson.perception.detector import Detection, Detector
+from brain.io.webcam import Webcam
+from brain.perception.detector import Detection, Detector
 
 # Per-class BGR colors, keyed on class id. Stable ordering across frames.
 _COLORS = [

@@ -1,4 +1,4 @@
-"""Tests for jetson/nav/geo.py. Ground-truth values from Google Maps."""
+"""Tests for brain/nav/geo.py. Ground-truth values from Google Maps."""
 from __future__ import annotations
 
 import math
@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from jetson.nav.geo import bearing, haversine, heading_error
+from brain.nav.geo import bearing, haversine, heading_error
 
 
 # Rutgers College Avenue Student Center -> Rutgers Gateway Transit (known ~400m apart).

@@ -4,7 +4,7 @@ How the robot gets from "task received" to "trash inside the intake." Read [CLAU
 
 ## Ownership
 
-This doc is the **backend / CV scope** — what runs on the **brain machine** (the developer laptop/Mac for the hackathon prototype; a Jetson Orin Nano in a future self-contained deployment). The code lives under `jetson/` in the repo — that folder name is historical, not a deployment location. See [CLAUDE.md](CLAUDE.md) for the split-compute architecture: brain on laptop, Pi on robot as an I/O proxy, WebSocket + MJPEG between them.
+This doc is the **backend / CV scope** — what runs on the **brain desktop** (RTX 4080). The code lives under `brain/` in the repo. See [CLAUDE.md](CLAUDE.md) for the two-machine architecture: brain desktop + Pi on robot as an I/O proxy, WebSocket + MJPEG between them.
 
 **Out of scope (someone else owns):** getting iPhone sensor data onto the brain machine. By the time this code runs, the robot's current GPS and heading are available via `LatestSensorState` — the iPhone posts heartbeats directly to the brain over local WiFi, or polls through the relay. Either way, we just consume a `SensorReading` struct.
 
@@ -24,7 +24,7 @@ Given (arriving from upstream — we consume, not produce):
 2. **Orientation** — robot's current `heading_deg` (true north, clockwise) and any IMU data from the same iPhone.
 3. **Walk path** — ordered list of `(lat, lon)` waypoints from Apple Maps via the relay's `POST /routes/apple`.
 4. **Target photo** — reporter's image of the trash. Primary use is the GPS tag it carries.
-5. **Camera** — live C270 webcam feed. Physically connected to the Pi; streamed to the brain over MJPEG on WiFi (prototype) or attached directly to the brain (future Jetson deployment).
+5. **Camera** — live C270 webcam feed. Physically connected to the Pi; streamed to the brain desktop over MJPEG on WiFi.
 
 Produce:
 - Drive command `{"cmd":"drive","left":<int>,"right":<int>}` over WebSocket to the Pi at 10Hz.
@@ -84,17 +84,27 @@ Two sensor sources both voting on "stop / go around" is fine. Don't try to fuse 
 
 ### Job 3 — Visual nav (SEARCHING / APPROACHING / VERIFYING)
 
-Same as before — YOLO `trash` detections drive the control loop directly. Only runs as primary nav when the GPS distance to the final waypoint is < `ARRIVAL_THRESHOLD_M`.
+This is where the **image-conditioned target finder** takes over. Instead of running YOLO and looking for a generic `trash` class, we run **OWLv2** (image-guided detection) with the reporter's photo (cropped to the trash) as the reference query. Output is a list of bounding boxes scored by visual similarity to that reference.
+
+Flow:
+- At task-start time, the brain fetches the reporter's photo + crop from the relay, runs OWLv2's image encoder on the crop once, and caches the query embedding for the lifetime of the task.
+- Per frame (from the Pi's MJPEG stream during final approach): `target_finder.detect(frame)` → `list[Detection]`, sorted by similarity.
+- Demo assumption: single target in scene, so the control loop takes the top box above `TARGET_MIN_SIM` and servos toward it. No GPS-reprojection re-ranking, no embedding-based disambiguation.
+
+Only runs as primary nav when the GPS distance to the final waypoint is < `ARRIVAL_THRESHOLD_M`. During NAVIGATING the regular YOLO is still doing Job 2 obstacle detection; OWLv2 idles until we hit 3m.
+
+Why OWLv2 over plain CLIP re-ranking of YOLO crops: OWLv2 is a **detector** (gives you boxes directly), not just an encoder. You get the "where is it?" answer in one pass. Also robust to the open-vocab case — our YOLO is only trained on 5 classes; OWLv2 handles anything.
 
 ### Single inference pass
 
 One YOLO forward pass per frame outputs all three jobs: segmentation mask, detection list with class+bbox, and a derived per-detection distance estimate. Don't run three separate models — tax the brain once per frame.
 
 Module layout:
-- [jetson/perception/detector.py](../jetson/perception/detector.py) — owns the inference loop, publishes to shared state.
-- [jetson/perception/course.py](../jetson/perception/course.py) — Job 1 (mask → course signals).
-- [jetson/perception/obstacles.py](../jetson/perception/obstacles.py) — Job 2 (detections + mask → obstacle signals).
-- [jetson/perception/servo.py](../jetson/perception/servo.py) — Job 3 (detections → motor commands during APPROACHING).
+- [brain/perception/detector.py](../brain/perception/detector.py) — owns the YOLOv8n inference loop for Jobs 1+2, publishes to shared state.
+- [brain/perception/target_finder.py](../brain/perception/target_finder.py) — owns the OWLv2 inference loop for Job 3, publishes target matches to shared state.
+- [brain/perception/course.py](../brain/perception/course.py) — Job 1 (mask → course signals).
+- [brain/perception/obstacles.py](../brain/perception/obstacles.py) — Job 2 (YOLO detections + mask → obstacle signals).
+- [brain/perception/servo.py](../brain/perception/servo.py) — Job 3 (target detections → motor commands during APPROACHING).
 
 ## Core design
 
@@ -119,7 +129,7 @@ left, right      = diff_drive(fwd_speed, turn_rate)                    # pwm ∈
 pi.set_motors(left, right)
 ```
 
-That's it. Three pure functions from [jetson/nav/geo.py](../jetson/nav/geo.py) (`haversine`, `bearing`, `heading_error`) plus one proportional controller. No PID integral term until you observe actual drift.
+That's it. Three pure functions from [brain/nav/geo.py](../brain/nav/geo.py) (`haversine`, `bearing`, `heading_error`) plus one proportional controller. No PID integral term until you observe actual drift.
 
 **Why taper forward speed with `cos(err)`?** If the robot is pointing 90° off, driving forward wastes time. `cos(err)` is 1 pointing-at-target, 0 perpendicular, negative beyond 90° (clamp to 0). This lets it turn-in-place when way off, drive-and-turn when close to aligned.
 
@@ -182,25 +192,31 @@ Lost sight for >3s → bounce back to `SEARCHING`.
 
 ## The target photo — what do we do with it?
 
-**Minimum (recommended for hackathon):** the photo's only job is to give a GPS tag. The Jetson never loads the photo. YOLO detects "any trash-like object" near the destination. If there are multiple candidates, pick the closest to the GPS waypoint (re-projected into image space using heading).
+The reporter's photo does two things:
 
-**Stretch (don't do this first):** run CLIP on the reporter photo at report time, store the embedding in the relay, and at pickup time run CLIP on each YOLO crop to pick the closest match. Gives robustness in cluttered scenes. Adds a model, a relay column, and a failure mode. Skip until the GPS-only version works end-to-end.
+1. **GPS tag for routing** — Apple Maps gets `reporter_lat, reporter_lon` as the destination; the robot drives there using waypoint following.
+2. **Reference image for OWLv2** — once the robot is within `ARRIVAL_THRESHOLD_M` of the GPS point, the photo is used as the query for the image-conditioned target finder (Job 3 above). OWLv2 finds "the thing that looks like this" in the live C270 feed.
+
+**Cropping.** OWLv2's image-guided detection works best when the query image tightly frames the target. At task-start time, the brain crops the reporter's photo to the trash region using the existing YOLOv8n detector (pick the highest-confidence central detection matching our trash classes). If YOLOv8n finds nothing in the reporter photo (e.g., weak class like `paper`), fall back to the full photo and lower `TARGET_MIN_SIM`.
+
+**Why not CLIP re-ranking of YOLO crops?** That was a stretch path in an earlier draft. OWLv2 replaces it: it's a detector *and* does the image-similarity matching in one pass, gives you boxes directly, and handles open-vocabulary targets that YOLOv8n wasn't trained on.
 
 ## What kind of "model" is this?
 
 The word "model" here is overloaded. In this system:
 
-- **Control model** — classical reactive, no ML. Three state variables (pose, waypoint, ultrasonic envelope), one proportional controller, one subsumption layer. Lives in [jetson/nav/](../jetson/nav/).
-- **Perception model** — YOLO (pretrained + fine-tuned on TACO + Rutgers photos). Lives in [jetson/perception/](../jetson/perception/). Trained once, loaded at Jetson boot.
+- **Control model** — classical reactive, no ML. Three state variables (pose, waypoint, ultrasonic envelope), one proportional controller, one subsumption layer. Lives in [brain/nav/](../brain/nav/).
+- **General-purpose perception model** — YOLOv8n (pretrained + fine-tuned on TACO + Rutgers photos). Used for Job 2 obstacle detection during NAVIGATING. Lives in [brain/perception/detector.py](../brain/perception/detector.py). Trained once, loaded at brain startup.
+- **Image-conditioned target finder** — OWLv2 (`google/owlv2-base-patch16-ensemble`), a ~155M-param open-vocab detector. Used for Job 3 during SEARCHING / APPROACHING / VERIFYING, with the reporter photo as the query. Lives in [brain/perception/target_finder.py](../brain/perception/target_finder.py). Used off-the-shelf; not fine-tuned.
 - **World model** — implicit. We don't build a map. We trust Apple Maps for global routing and the ultrasonics for local reactivity. No SLAM.
 
-If you were expecting an end-to-end learned nav policy: no. Hackathon constraints rule that out. The hybrid classical + perception-model approach is both faster to build and easier to debug when something goes wrong at 2am.
+If you were expecting an end-to-end learned nav *policy*: no. The classical control loop + perception hybrid is faster to build and easier to debug at 2am. The "big model" in this stack is perception (OWLv2), not a policy head.
 
 ## Open decisions
 
 1. **Pose-to-brain wire format** — minimum required: `{ts, lat, lon, h_accuracy_m, heading_deg}`. IMU (accel/gyro) is a nice-to-have. Transport is HTTP POST from the iPhone directly to the brain's FastAPI endpoint on port 8000 (see CLAUDE.md).
 2. **Heading quality** — iPhone compass is noisy and sensitive to motors (see CLAUDE.md hardware constraints). Add a sanity check: reject heading that jumps >90° between 100ms samples.
-3. **Apple Maps polyline decoding** — Apple returns encoded polylines. Need a decoder in [jetson/nav/waypoint_follower.py](../jetson/nav/waypoint_follower.py). Use a tested library port, don't roll your own.
+3. **Apple Maps polyline decoding** — Apple returns encoded polylines. Need a decoder in [brain/nav/waypoint_follower.py](../brain/nav/waypoint_follower.py). Use a tested library port, don't roll your own.
 4. **Waypoint density** — Apple Maps returns coarse waypoints at turn points. We may want to interpolate intermediate points every N meters so the control loop has a nearer target to chase. Start without; add if the robot oscillates.
 5. **Drivable-surface model** — for Job 1 (course confirmation), are we training our own segmentation head on Rutgers sidewalks, or using a pretrained model (e.g., Mask2Former, SAM with a "sidewalk" prompt, or YOLO-seg fine-tuned)? Pretrained + fine-tune on a small Rutgers dataset is the realistic path.
 6. **CV confidence thresholds for obstacles** — false positives (YOLO spuriously flagging a shadow as "person") will stall the robot. Needs field tuning. Start with `min_conf = 0.6` and raise if flaky.
@@ -212,18 +228,19 @@ Each stage should be demo-able standalone before moving on.
 
 | # | Goal | New files | Test |
 |---|---|---|---|
-| 0 | Pure geo math | [jetson/nav/geo.py](../jetson/nav/geo.py) | Unit tests with Google-Maps-verified lat/lon pairs |
-| 1 | Drive to a single GPS point in open field | [jetson/nav/control_loop.py](../jetson/nav/control_loop.py), localization stub | Hard-code a target lat/lon 20m away, robot drives to it |
-| 2 | Accept a waypoint list, follow it | [jetson/nav/waypoint_follower.py](../jetson/nav/waypoint_follower.py) | Hand-write a 3-point waypoint list, robot traverses all 3 |
+| 0 | Pure geo math | [brain/nav/geo.py](../brain/nav/geo.py) | Unit tests with Google-Maps-verified lat/lon pairs |
+| 1 | Drive to a single GPS point in open field | [brain/nav/control_loop.py](../brain/nav/control_loop.py), localization stub | Hard-code a target lat/lon 20m away, robot drives to it |
+| 2 | Accept a waypoint list, follow it | [brain/nav/waypoint_follower.py](../brain/nav/waypoint_follower.py) | Hand-write a 3-point waypoint list, robot traverses all 3 |
 | 3 | Consume Apple Maps route payload | Extend waypoint_follower | Curl relay's `/routes/apple`, feed into nav |
-| 4 | Reactive ultrasonic avoidance | [jetson/nav/avoidance.py](../jetson/nav/avoidance.py) | Place a box in path, robot goes around |
-| 5 | YOLO inference loop on live camera | [jetson/perception/detector.py](../jetson/perception/detector.py) | Live detections at 15+ FPS, logged to JSONL |
-| 6 | CV obstacle detection (Job 2) | [jetson/perception/obstacles.py](../jetson/perception/obstacles.py) | Walk in front of robot; camera triggers stop independent of ultrasonics |
-| 7 | Course confirmation (Job 1) | [jetson/perception/course.py](../jetson/perception/course.py) | Drive onto grass; `course_lost` signal fires within 1s |
-| 8 | Visual search + approach (Job 3) | [jetson/perception/servo.py](../jetson/perception/servo.py) | At 3m, robot finds YOLO detection and closes to 0.5m |
-| 9 | End-to-end: report → route → drive → intake | Glue in [jetson/main.py](../jetson/main.py) | Reporter posts a photo; robot picks it up |
+| 4 | Reactive ultrasonic avoidance | [brain/nav/avoidance.py](../brain/nav/avoidance.py) | Place a box in path, robot goes around |
+| 5 | YOLO inference loop on live camera | [brain/perception/detector.py](../brain/perception/detector.py) | Live detections at 15+ FPS, logged to JSONL |
+| 6 | CV obstacle detection (Job 2) | [brain/perception/obstacles.py](../brain/perception/obstacles.py) | Walk in front of robot; camera triggers stop independent of ultrasonics |
+| 7 | Course confirmation (Job 1) | [brain/perception/course.py](../brain/perception/course.py) | Drive onto grass; `course_lost` signal fires within 1s |
+| 8a | OWLv2 target finder standalone | [brain/perception/target_finder.py](../brain/perception/target_finder.py) | Webcam + reference photo → correct bbox in live frame at 15+ FPS |
+| 8b | Visual search + approach using target finder (Job 3) | [brain/perception/servo.py](../brain/perception/servo.py) | At 3m, robot finds OWLv2 match and closes to 0.5m |
+| 9 | End-to-end: report → route → drive → intake | Glue in [brain/main.py](../brain/main.py) | Reporter posts a photo; robot picks it up |
 
-Stages 0–3 are a weekend. Stage 4 needs the Pi/ultrasonics wired up + WebSocket link to the brain. Stages 5–8 need the C270 streaming MJPEG from the Pi to the brain and sufficient labeled data; TensorRT export is only required for the future Jetson deployment — on the brain Mac, `.pt` weights load directly. Stage 9 depends on the iPhone streaming GPS to the brain and the relay being up.
+Stages 0–3 are a weekend. Stage 4 needs the Pi/ultrasonics wired up + WebSocket link to the brain. Stages 5–8 need the C270 streaming MJPEG from the Pi to the brain (stage 8a can be tested on any laptop with a webcam, no Pi needed). On the RTX 4080 brain, `.pt` weights and OWLv2 both load directly — no TensorRT needed. Stage 9 depends on the iPhone streaming GPS to the brain and the relay being up.
 
 ## Testing without the robot
 

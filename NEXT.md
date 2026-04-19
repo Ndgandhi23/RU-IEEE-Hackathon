@@ -21,9 +21,9 @@ Date of this snapshot: **2026-04-18**.
 - For the Rutgers pickup use case, bottle + can is most of what matters. Weak classes can be improved in v2 with ~200–400 extra Rutgers images per class.
 
 ### Navigation scaffolding (brain-side)
-- [jetson/nav/geo.py](jetson/nav/geo.py) — pure-math GPS utilities (haversine, bearing, heading_error). 15 unit tests, all passing.
-- [jetson/io/webcam.py](jetson/io/webcam.py) — async USB webcam capture, thread-safe latest-frame access.
-- [jetson/perception/detector.py](jetson/perception/detector.py) — YOLO wrapper with typed `Detection` dataclass. Works with `.pt`, `.onnx`, `.engine`.
+- [brain/nav/geo.py](brain/nav/geo.py) — pure-math GPS utilities (haversine, bearing, heading_error). 15 unit tests, all passing.
+- [brain/io/webcam.py](brain/io/webcam.py) — async USB webcam capture, thread-safe latest-frame access.
+- [brain/perception/detector.py](brain/perception/detector.py) — YOLO wrapper with typed `Detection` dataclass. Works with `.pt`, `.onnx`, `.engine`.
 - [tools/live_detect.py](tools/live_detect.py) — webcam → detector → boxes drawn. Has interactive mode (cv2 window) and headless `--save-dir` mode.
 - [tools/webcam_preview.py](tools/webcam_preview.py) — same, no detector.
 
@@ -51,21 +51,29 @@ Point the webcam at a water bottle or soda can → green/blue box with class nam
 
 ## Architecture (summary — full details in writeup/CLAUDE.md)
 
-**Split-compute, two machines:**
-- **Brain machine** (developer laptop / Mac for hackathon, Jetson later) — runs YOLO + nav logic + state machine. Code lives under `jetson/` (folder name is historical).
+**Two machines:**
+- **Brain desktop** (RTX 4080, 16 GB VRAM) — runs everything that isn't motor I/O: YOLOv8n obstacle detection, OWLv2 image-conditioned target finder, nav state machine, control loop, FastAPI listener for iPhone GPS. Code lives under `brain/`.
 - **Pi 3B on the robot** — drives motors, reads ultrasonics, streams C270 webcam frames. **Talks to brain over local WiFi: WebSocket on :8765 for commands/sensors, MJPEG on :8080 for frames.** No business logic on the Pi.
 - **Relay** (Node/Express, `relay/`) — shared backend for phones + brain. Not yet written.
 
-This lets the brain iterate fast on a laptop while the robot only needs the Pi set up. Jetson is a future drop-in replacement for the brain.
+We previously considered splitting perception (4080) and nav (4070) across two desktops. Consolidated onto the single 4080 because: lower latency (no WebSocket hop between perception and control loop), simpler deploy (one process tree, one log source), and the 4080 has ~12 GB of VRAM headroom after loading both YOLOv8n and OWLv2-base.
 
 ---
 
 ## What's next (ordered by priority)
 
-### 1. Verify the model works on real-world frames (~30 min)
+### 1. Verify the YOLO model works on real-world frames (~30 min)
 Run `python demo.py`, hold up a bottle and a can, confirm detection works. If `bottle` confidence is reliably >0.8 under your lighting, the model is good. If not, flag it — we may need imgsz or conf tuning.
 
-### 2. Pi-side motor controller + streaming (new code, ~2 hr)
+### 2. OWLv2 target finder (new code, ~1 hr)
+[brain/perception/target_finder.py](brain/perception/target_finder.py) — image-conditioned detector. Wraps `google/owlv2-base-patch16-ensemble` via HuggingFace `transformers`. API:
+- `load_reference(crop: np.ndarray)` — pre-compute + cache the reference embedding once at task start
+- `detect(frame: np.ndarray) -> list[Detection]` — run image-guided detection against the cached embedding, return boxes sorted by similarity
+- Threshold via `TARGET_MIN_SIM` (start 0.3)
+
+Testable offline with any (reference, live-frame) pair. Plan: a `tools/test_target_finder.py` analogous to `tools/live_detect.py`, takes `--reference path/to/crop.jpg` and runs OWLv2 on the webcam.
+
+### 3. Pi-side motor controller + streaming (new code, ~2 hr)
 Create `pi/motor_controller/main.py` on the Pi:
 - WebSocket server on :8765
   - Accepts `{"cmd":"drive","left":<int>,"right":<int>}` (pwm ∈ [-255, 255])
@@ -77,29 +85,28 @@ Create `pi/motor_controller/main.py` on the Pi:
 
 This requires physical wiring: H-bridge ↔ Pi GPIO, ultrasonics ↔ Pi GPIO, C270 ↔ Pi USB.
 
-### 3. Brain-side Pi bridge (new code, ~30 min)
-[jetson/io/pi_bridge.py](jetson/io/pi_bridge.py) — WebSocket client to Pi, with:
+### 4. Brain-side Pi bridge (new code, ~30 min)
+[brain/io/pi_bridge.py](brain/io/pi_bridge.py) — WebSocket client to Pi, with:
 - `set_motors(left, right)` — fire and forget
 - `set_intake(pwm)` — fire and forget
 - `get_ultrasonics()` — returns latest or None if stale >500ms
 - Auto-reconnect on drop
 
-Also a frame consumer (fork of `jetson/io/webcam.py` that pulls from MJPEG URL instead of cv2.VideoCapture).
+Also a frame consumer (fork of `brain/io/webcam.py` that pulls from MJPEG URL instead of cv2.VideoCapture).
 
-### 4. iPhone GPS listener (new code, ~30 min)
-[jetson/io/iphone_listener.py](jetson/io/iphone_listener.py) — FastAPI endpoint on :8000 that the robot iPhone POSTs `{"location":{...},"sentAt":...}` to. Maintains `LatestSensorState` singleton. Heartbeat schema in writeup/CLAUDE.md.
+### 5. iPhone GPS listener (new code, ~30 min)
+[brain/io/iphone_listener.py](brain/io/iphone_listener.py) — FastAPI endpoint on :8000 that the robot iPhone POSTs `{"location":{...},"sentAt":...}` to. Maintains `LatestSensorState` singleton. Heartbeat schema in writeup/CLAUDE.md.
 
-### 5. State machine skeleton (~45 min)
-[jetson/main.py](jetson/main.py) — IDLE → PLANNING → NAVIGATING → SEARCHING → APPROACHING → INTAKING → VERIFYING → REPORTING per the state diagram in writeup/CLAUDE.md. Stub each state; wire `pi_bridge` + `iphone_listener` + `detector` into the shared state.
+### 6. State machine skeleton (~45 min)
+[brain/main.py](brain/main.py) — IDLE → PLANNING → NAVIGATING → SEARCHING → APPROACHING → INTAKING → VERIFYING → REPORTING per the state diagram in writeup/CLAUDE.md. Stub each state; wire `pi_bridge` + `iphone_listener` + `detector` + `target_finder` into the shared state.
 
-### 6. Relay backend (~2 hr, can be parallel to nav work)
+### 7. Relay backend (~2 hr, can be parallel to nav work)
 `relay/` — Node/Express. Endpoints: `POST /reports`, `GET /reports/latest`, `POST /robot/heartbeat`, `POST /routes/apple` (proxies Apple Maps MapKit JS). Contract lives in [app/README.md](app/README.md). Needs an Apple Developer MapKit token in `.env`.
 
 ### Deferred (don't work on until the above is running)
-- TensorRT export (only needed for Jetson)
 - Waypoint follower (needs relay + Apple Maps first)
-- Visual servoing for final approach (needs state machine)
 - Data v2 for wrapper/cup/paper (nice-to-have; current model is plenty for bottle/can demo)
+- VLM-based tiebreaker for ambiguous target scenes (demo has a single target — not needed)
 
 ---
 
@@ -127,10 +134,11 @@ RU-IEEE-Hackathon/
 │   ├── nav.md               # nav design
 │   ├── trash-detection.md   # YOLO design
 │   └── ...
-├── jetson/                  # code that runs on the BRAIN MACHINE
+├── brain/                  # code that runs on the BRAIN DESKTOP (RTX 4080)
 │   ├── nav/geo.py           # ✓ built
 │   ├── io/webcam.py         # ✓ built
-│   ├── perception/detector.py  # ✓ built
+│   ├── perception/detector.py       # ✓ built (YOLOv8n for obstacles / general)
+│   ├── perception/target_finder.py  # TODO (OWLv2 image-conditioned target finder)
 │   ├── io/pi_bridge.py      # TODO
 │   ├── io/iphone_listener.py # TODO
 │   └── main.py              # TODO (state machine)
@@ -158,13 +166,15 @@ RU-IEEE-Hackathon/
 
 Your most likely assignments when the user returns:
 - "run the demo" → `python demo.py`
-- "build the Pi side" → item 2 above
-- "build the brain's Pi client" → item 3 above
-- "wire it all into a state machine" → items 3 + 4 + 5 together
+- "build the target finder" → item 2 above (OWLv2)
+- "build the Pi side" → item 3 above
+- "build the brain's Pi client" → item 4 above
+- "wire it all into a state machine" → items 4 + 5 + 6 together
 - "fix the cup/wrapper detection" → v2 data collection, see writeup/trash-detection.md
 
-**Don't** re-train the model unless the user explicitly asks — the current weights are good for bottle+can.
-**Don't** work on TensorRT export — not needed for Mac brain.
+**Don't** re-train the YOLO model unless the user explicitly asks — the current weights are good for bottle+can as the obstacle/general detector.
+**Don't** work on TensorRT export — the brain is an RTX 4080, `.pt` weights are plenty fast.
 **Don't** expand Pi responsibilities beyond motor/sensor/camera proxy.
+**Don't** rebuild OWLv2 from scratch or fine-tune it — it's used off-the-shelf from HuggingFace; only swap models if field testing exposes a problem.
 
 Update this file (`NEXT.md`) whenever the priority list shifts.
