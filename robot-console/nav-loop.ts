@@ -90,6 +90,15 @@ export type NavDecision = {
   target: LatLon | null;
   /** Meters to the current target waypoint (null if no target). */
   distanceToTargetM: number | null;
+  /**
+   * Total remaining route distance. Prefers Apple Maps' `distanceMeters`
+   * (walkway-snapped, refreshed every ~15s by the relay) and falls back to
+   * on-device haversine from pose to the final waypoint when Apple's number
+   * is missing.
+   */
+  distanceRemainingM: number | null;
+  /** Source of `distanceRemainingM`: 'apple' when from Apple Maps, else 'haversine'. */
+  distanceRemainingSource: 'apple' | 'haversine' | null;
   /** Bearing from robot to target, degrees from North (null if no target). */
   bearingDeg: number | null;
   /** Signed heading error in degrees (null if no heading). */
@@ -246,6 +255,20 @@ export function useRobotNav(options: UseRobotNavOptions): NavState {
       return;
     }
 
+    // "Authoritative" distance for the arrival decision.
+    // Apple Maps' total route distance is walkway-snapped on both ends and
+    // therefore doesn't drift when the destination's stored lat/lon was
+    // captured with a stale/low-accuracy GPS fix. Prefer it when present;
+    // otherwise fall back to straight-line haversine to the final waypoint.
+    const haversineToFinal = haversineMeters(
+      pose.location,
+      waypoints[waypoints.length - 1]
+    );
+    const distanceRemainingM =
+      route.distanceMeters != null ? route.distanceMeters : haversineToFinal;
+    const distanceRemainingSource: 'apple' | 'haversine' =
+      route.distanceMeters != null ? 'apple' : 'haversine';
+
     // Advance the cursor across any waypoints we're already close to.
     let index = cursor;
     while (index < waypoints.length) {
@@ -253,10 +276,21 @@ export function useRobotNav(options: UseRobotNavOptions): NavState {
       const d = haversineMeters(pose.location, wp);
       const isFinal = index === waypoints.length - 1;
       const threshold = isFinal ? FINAL_ARRIVAL_M : WAYPOINT_ADVANCE_M;
-      if (d > threshold) break;
+      // For the FINAL waypoint, also accept Apple's total as a "close enough"
+      // signal. This lets the robot declare arrival when Apple says we're on
+      // the same walkway node as the destination, even if haversine is off
+      // (e.g. reporter submitted with a stale GPS fix).
+      const closeByApple =
+        isFinal &&
+        route.distanceMeters != null &&
+        route.distanceMeters <= FINAL_ARRIVAL_M;
+      if (d > threshold && !closeByApple) break;
       index += 1;
+      const why = closeByApple
+        ? `Apple distance ${route.distanceMeters?.toFixed(1)}m <= ${FINAL_ARRIVAL_M}m`
+        : `${d.toFixed(1)}m <= ${threshold}m`;
       pushDebug(
-        `waypoint ${index - 1} reached (${d.toFixed(1)}m <= ${threshold}m); advancing to ${index}/${waypoints.length}`
+        `waypoint ${index - 1} reached (${why}); advancing to ${index}/${waypoints.length}`
       );
     }
     waypointIndexRef.current = index;
@@ -270,10 +304,16 @@ export function useRobotNav(options: UseRobotNavOptions): NavState {
         stepInstruction: route.steps.at(-1)?.instruction ?? null,
         target: null,
         distanceToTargetM: 0,
+        distanceRemainingM:
+          route.distanceMeters != null ? Math.min(route.distanceMeters, 0) : 0,
+        distanceRemainingSource,
         bearingDeg: null,
         headingErrorDeg: null,
         command: { left: 0, right: 0, mode: 'stop' },
-        reason: 'arrived at destination — motors stopped, awaiting classifier',
+        reason:
+          distanceRemainingSource === 'apple'
+            ? `arrived (Apple route distance <= ${FINAL_ARRIVAL_M}m) — motors stopped, awaiting classifier`
+            : 'arrived at destination — motors stopped, awaiting classifier',
       };
       setDecision(next);
       maybeStopMotors(piLink, enabled, lastCommandAtRef, pushDebug, true);
@@ -319,6 +359,8 @@ export function useRobotNav(options: UseRobotNavOptions): NavState {
       stepInstruction,
       target,
       distanceToTargetM,
+      distanceRemainingM,
+      distanceRemainingSource,
       bearingDeg,
       headingErrorDeg,
       command,
@@ -374,6 +416,8 @@ function idleDecision(reason = 'idle'): NavDecision {
     stepInstruction: null,
     target: null,
     distanceToTargetM: null,
+    distanceRemainingM: null,
+    distanceRemainingSource: null,
     bearingDeg: null,
     headingErrorDeg: null,
     command: { left: 0, right: 0, mode: 'stop' },
@@ -391,6 +435,8 @@ function routedIdleDecision(route: NavRoute, cursor: number): NavDecision {
     stepInstruction: route.steps[findStepIndex(route.steps, cursor)]?.instruction ?? null,
     target,
     distanceToTargetM: null,
+    distanceRemainingM: route.distanceMeters,
+    distanceRemainingSource: route.distanceMeters != null ? 'apple' : null,
     bearingDeg: null,
     headingErrorDeg: null,
     command: { left: 0, right: 0, mode: 'stop' },

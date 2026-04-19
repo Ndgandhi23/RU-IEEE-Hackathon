@@ -183,12 +183,39 @@ class RelayArrivalGate(Gate):
             self._set(False, "no task destination")
             return
 
-        dist_m = haversine(cur_ll[0], cur_ll[1], dst_ll[0], dst_ll[1])
         task_id = task.get("id", "?")
-        if dist_m <= self._threshold_m:
-            self._set(True, f"arrived: task={task_id} dist={dist_m:.1f}m ≤ {self._threshold_m:.1f}m")
+
+        # Primary source of truth: Apple Maps' total route distance. It's
+        # walkway-snapped on both ends, so it doesn't drift when the report
+        # was submitted with a stale/low-accuracy phone GPS fix. When it's
+        # available we use it directly; haversine is the fallback.
+        nav = task.get("navigation") or {}
+        apple_dist = nav.get("distanceMeters") if isinstance(nav, dict) else None
+        have_apple = isinstance(apple_dist, (int, float))
+
+        haversine_m = haversine(cur_ll[0], cur_ll[1], dst_ll[0], dst_ll[1])
+
+        if have_apple:
+            dist_m = float(apple_dist)
+            source = "apple"
+            extra = f" (haversine={haversine_m:.1f}m)"
         else:
-            self._set(False, f"en route: task={task_id} dist={dist_m:.1f}m > {self._threshold_m:.1f}m")
+            dist_m = haversine_m
+            source = "haversine"
+            extra = ""
+
+        if dist_m <= self._threshold_m:
+            self._set(
+                True,
+                f"arrived: task={task_id} dist={dist_m:.1f}m ≤ {self._threshold_m:.1f}m "
+                f"[{source}]{extra}",
+            )
+        else:
+            self._set(
+                False,
+                f"en route: task={task_id} dist={dist_m:.1f}m > {self._threshold_m:.1f}m "
+                f"[{source}]{extra}",
+            )
 
 
 def _coerce_latlon(d: object) -> tuple[float, float] | None:

@@ -4,6 +4,8 @@ import { startTransition, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
   Alert,
+  Linking,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -14,6 +16,7 @@ import {
 
 import { PiLink, type PiStatus, type PiTelemetry } from './pi-link';
 import { useRobotNav, type NavRoute } from './nav-loop';
+import { haversineMeters, bearingDegrees, type LatLon } from './nav-math';
 
 // ===========================================================================
 // Types
@@ -635,6 +638,16 @@ export default function App() {
             nav={nav}
             motorsLive={motorsEnabled && piStatus === 'open'}
             rawNavigation={packet.task?.navigation ?? null}
+            pose={pose}
+            destination={
+              packet.task
+                ? {
+                    latitude: packet.task.destination.latitude,
+                    longitude: packet.task.destination.longitude,
+                  }
+                : null
+            }
+            onMapsLog={pushSystem}
             logs={logsByCategory.nav}
           />
         )}
@@ -927,13 +940,48 @@ function NavTab({
   nav,
   motorsLive,
   rawNavigation,
+  pose,
+  destination,
+  onMapsLog,
   logs,
 }: {
   nav: ReturnType<typeof useRobotNav>;
   motorsLive: boolean;
   rawNavigation: RobotNavigation | null;
+  pose: { location: LatLon | null; headingDeg: number | null };
+  destination: LatLon | null;
+  onMapsLog: (msg: string) => void;
   logs: LogEntry[];
 }) {
+  const openUrl = async (url: string, label: string) => {
+    try {
+      const can = await Linking.canOpenURL(url);
+      if (!can && Platform.OS !== 'ios') {
+        Alert.alert('Cannot open link', url);
+        onMapsLog(`maps open refused: ${url}`);
+        return;
+      }
+      await Linking.openURL(url);
+      onMapsLog(`maps open ${label}`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      Alert.alert('Failed to open Apple Maps', msg);
+      onMapsLog(`maps open failed: ${msg}`);
+    }
+  };
+
+  const dest = destination;
+  const src = pose.location;
+  const fmt = (p: LatLon) => `${p.latitude.toFixed(6)},${p.longitude.toFixed(6)}`;
+  const routeUrl = src && dest
+    ? `http://maps.apple.com/?saddr=${fmt(src)}&daddr=${fmt(dest)}&dirflg=w`
+    : null;
+  const pinUrl = dest
+    ? `http://maps.apple.com/?ll=${fmt(dest)}&q=Report%20location&t=m`
+    : null;
+  const poseUrl = src
+    ? `http://maps.apple.com/?ll=${fmt(src)}&q=Robot%20position&t=m`
+    : null;
   const totalWaypoints = nav.route?.waypoints.length ?? 0;
   const totalSteps = nav.route?.steps.length ?? 0;
   const wpLabel = nav.route
@@ -963,6 +1011,22 @@ function NavTab({
         <DataRow
           label="Arrived"
           value={nav.decision.arrived ? 'YES — search phase' : 'No'}
+        />
+        <DataRow
+          label="Distance remaining"
+          value={
+            nav.decision.distanceRemainingM != null
+              ? `${nav.decision.distanceRemainingM.toFixed(1)} m (${nav.decision.distanceRemainingSource ?? '—'})`
+              : '—'
+          }
+        />
+        <DataRow
+          label="Haversine to final wp"
+          value={
+            pose.location && nav.route && nav.route.waypoints.length > 0
+              ? `${haversineMeters(pose.location, nav.route.waypoints[nav.route.waypoints.length - 1]).toFixed(1)} m (live)`
+              : '—'
+          }
         />
         <DataRow label="Step" value={stepLabel} />
         <DataRow
@@ -1005,6 +1069,77 @@ function NavTab({
         />
         <Text style={styles.jsonLabel}>Reason</Text>
         <Text style={styles.jsonBlock}>{nav.decision.reason}</Text>
+      </Card>
+
+      <Card
+        title="Open in Apple Maps"
+        subtitle="Hand off to the Maps app on this phone. Uses current robot GPS as the starting point and the report location as the destination."
+      >
+        <DataRow
+          label="From (robot)"
+          value={src ? `${src.latitude.toFixed(6)}, ${src.longitude.toFixed(6)}` : 'No GPS yet'}
+        />
+        <DataRow
+          label="To (report)"
+          value={dest ? `${dest.latitude.toFixed(6)}, ${dest.longitude.toFixed(6)}` : 'No task'}
+        />
+
+        <Pressable
+          style={({ pressed }) => [
+            styles.mapsButton,
+            !routeUrl && styles.mapsButtonDisabled,
+            pressed && routeUrl && styles.mapsButtonPressed,
+          ]}
+          disabled={!routeUrl}
+          onPress={() => routeUrl && openUrl(routeUrl, 'walking route')}
+        >
+          <Text style={[styles.mapsButtonText, !routeUrl && styles.mapsButtonTextDisabled]}>
+            Walking route (robot → report)
+          </Text>
+        </Pressable>
+
+        <Pressable
+          style={({ pressed }) => [
+            styles.mapsButton,
+            styles.mapsButtonSecondary,
+            !pinUrl && styles.mapsButtonDisabled,
+            pressed && pinUrl && styles.mapsButtonPressed,
+          ]}
+          disabled={!pinUrl}
+          onPress={() => pinUrl && openUrl(pinUrl, 'destination pin')}
+        >
+          <Text style={[styles.mapsButtonText, !pinUrl && styles.mapsButtonTextDisabled]}>
+            Pin destination only
+          </Text>
+        </Pressable>
+
+        <Pressable
+          style={({ pressed }) => [
+            styles.mapsButton,
+            styles.mapsButtonSecondary,
+            !poseUrl && styles.mapsButtonDisabled,
+            pressed && poseUrl && styles.mapsButtonPressed,
+          ]}
+          disabled={!poseUrl}
+          onPress={() => poseUrl && openUrl(poseUrl, 'robot pin')}
+        >
+          <Text style={[styles.mapsButtonText, !poseUrl && styles.mapsButtonTextDisabled]}>
+            Pin robot position only
+          </Text>
+        </Pressable>
+
+        {routeUrl ? (
+          <>
+            <Text style={styles.jsonLabel}>URL</Text>
+            <Text style={styles.jsonBlock}>{routeUrl}</Text>
+          </>
+        ) : null}
+        {Platform.OS === 'android' ? (
+          <Text style={styles.helperText}>
+            On Android this opens Apple's web viewer (or your default maps app) instead of the
+            native Maps app.
+          </Text>
+        ) : null}
       </Card>
 
       <Card
@@ -1074,6 +1209,69 @@ function NavTab({
             No navigation object in the current packet. Either no task is assigned, or
             the relay couldn't fetch an Apple Maps route (auth not configured, no
             network, etc.).
+          </Text>
+        )}
+      </Card>
+
+      <Card
+        title="Waypoint list"
+        subtitle="Every lat/lon the robot will drive through, in order. Active waypoint is highlighted; reached ones are dimmed."
+      >
+        {nav.route && nav.route.waypoints.length > 0 ? (
+          <>
+            <DataRow
+              label="Progress"
+              value={`${Math.min(nav.decision.waypointIndex + 1, nav.route.waypoints.length)} / ${nav.route.waypoints.length}`}
+            />
+            <ScrollView
+              style={styles.waypointScroll}
+              nestedScrollEnabled
+              contentContainerStyle={styles.waypointScrollContent}
+            >
+              {nav.route.waypoints.map((wp, i) => {
+                const reached = i < nav.decision.waypointIndex;
+                const active = i === nav.decision.waypointIndex && !nav.decision.arrived;
+                const distM = pose.location ? haversineMeters(pose.location, wp) : null;
+                const bearing = pose.location ? bearingDegrees(pose.location, wp) : null;
+                const stepIdx = findStepIndexForFlat(nav.route?.steps ?? [], i);
+                const marker = reached ? '✓' : active ? '▶' : '·';
+                return (
+                  <View
+                    key={`${i}-${wp.latitude.toFixed(6)}-${wp.longitude.toFixed(6)}`}
+                    style={[
+                      styles.waypointRow,
+                      active && styles.waypointRowActive,
+                      reached && styles.waypointRowReached,
+                    ]}
+                  >
+                    <Text style={styles.waypointIndex}>
+                      {marker} {String(i + 1).padStart(2, ' ')}
+                    </Text>
+                    <View style={styles.waypointBody}>
+                      <Text
+                        style={[
+                          styles.waypointCoord,
+                          active && styles.waypointActiveText,
+                          reached && styles.waypointReachedText,
+                        ]}
+                      >
+                        {wp.latitude.toFixed(6)}, {wp.longitude.toFixed(6)}
+                      </Text>
+                      <Text style={styles.waypointMeta}>
+                        {distM != null ? `${distM.toFixed(1)} m` : '— m'}
+                        {bearing != null ? ` · ${bearing.toFixed(0)}°` : ''}
+                        {stepIdx != null ? ` · step ${stepIdx + 1}` : ''}
+                      </Text>
+                    </View>
+                  </View>
+                );
+              })}
+            </ScrollView>
+          </>
+        ) : (
+          <Text style={styles.helperText}>
+            No waypoints yet. They appear once a task is assigned and the relay
+            returns a route (or the straight-line fallback kicks in).
           </Text>
         )}
       </Card>
@@ -1394,6 +1592,23 @@ function formatSeconds(value: number | null | undefined) {
   if (value == null) return 'Unavailable';
   if (value < 60) return `${Math.round(value)} s`;
   return `${(value / 60).toFixed(1)} min`;
+}
+
+// Map a flat waypoint index back to the step it belongs to. Mirrors the
+// nav-loop's flattening: step[0].waypoints then step[1].waypoints, etc.
+function findStepIndexForFlat(
+  steps: { waypoints: { latitude: number; longitude: number }[] }[],
+  flatIndex: number,
+): number | null {
+  if (!steps.length) return null;
+  let running = 0;
+  for (let i = 0; i < steps.length; i += 1) {
+    const count = steps[i].waypoints.length;
+    if (count === 0) continue;
+    if (flatIndex < running + count) return i;
+    running += count;
+  }
+  return null;
 }
 
 // ===========================================================================
@@ -1731,5 +1946,79 @@ const styles = StyleSheet.create({
     color: '#5F6D67',
     fontFamily: 'monospace',
     fontSize: 11,
+  },
+  waypointScroll: {
+    backgroundColor: '#F3F5F2',
+    borderRadius: 8,
+    marginTop: 8,
+    maxHeight: 320,
+  },
+  waypointScrollContent: {
+    gap: 2,
+    padding: 6,
+  },
+  waypointRow: {
+    alignItems: 'flex-start',
+    borderRadius: 6,
+    flexDirection: 'row',
+    gap: 8,
+    paddingHorizontal: 6,
+    paddingVertical: 4,
+  },
+  waypointRowActive: {
+    backgroundColor: '#E4EDE7',
+  },
+  waypointRowReached: {
+    opacity: 0.55,
+  },
+  waypointIndex: {
+    color: '#5F6D67',
+    fontFamily: 'monospace',
+    fontSize: 12,
+    minWidth: 36,
+  },
+  waypointBody: {
+    flex: 1,
+    gap: 2,
+  },
+  waypointCoord: {
+    color: '#1B2B21',
+    fontFamily: 'monospace',
+    fontSize: 12,
+  },
+  waypointActiveText: {
+    fontWeight: '800',
+  },
+  waypointReachedText: {
+    textDecorationLine: 'line-through',
+  },
+  waypointMeta: {
+    color: '#5F6D67',
+    fontFamily: 'monospace',
+    fontSize: 11,
+  },
+  mapsButton: {
+    alignItems: 'center',
+    backgroundColor: '#1E7B52',
+    borderRadius: 8,
+    marginTop: 10,
+    paddingVertical: 12,
+  },
+  mapsButtonSecondary: {
+    backgroundColor: '#2D3A33',
+  },
+  mapsButtonPressed: {
+    opacity: 0.75,
+  },
+  mapsButtonDisabled: {
+    backgroundColor: '#C7CEC9',
+  },
+  mapsButtonText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  mapsButtonTextDisabled: {
+    color: '#6B756F',
   },
 });
