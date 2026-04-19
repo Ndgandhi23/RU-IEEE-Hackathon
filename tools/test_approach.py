@@ -1,7 +1,7 @@
 """End-to-end brain validation on a webcam — no Pi, no motors.
 
-Wires TargetFinder (OWLv2) + VLMScout (Qwen3-VL) + ApproachController into
-the same decision loop the robot will use. Prints the discrete Action for
+Wires YoloFinder (trash_v1.pt) + VLMScout (Qwen3-VL) + ApproachController
+into the same decision loop the robot will use. Prints the discrete Action for
 each frame, overlays it on the webcam preview, and color-codes the frame
 border so you can eyeball what the controller is deciding from across the
 room.
@@ -32,7 +32,7 @@ import cv2
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from brain.control.loop import Action, ApproachController
 from brain.io.webcam import Webcam
-from brain.perception.target_finder import TargetFinder
+from brain.perception.yolo_finder import YoloFinder
 from brain.perception.types import Detection
 from brain.perception.vlm_scout import DEFAULT_MODEL as VLM_DEFAULT, VLMScout
 
@@ -181,11 +181,10 @@ def main() -> None:
     ap.add_argument("--device", type=int, default=0, help="webcam index")
     ap.add_argument("--width", type=int, default=1280)
     ap.add_argument("--height", type=int, default=720)
-    ap.add_argument("--min-sim", type=float, default=0.3, help="OWLv2 similarity threshold")
-    ap.add_argument("--owlv2-model", default="google/owlv2-base-patch16-ensemble")
+    ap.add_argument("--min-sim", type=float, default=0.5, help="YOLO confidence floor")
+    ap.add_argument("--yolo-weights", type=Path, default=Path("models/trash_v1.pt"),
+                    help="path to YOLO weights")
     ap.add_argument("--vlm-model", default=VLM_DEFAULT)
-    ap.add_argument("--torch-device", default=None,
-                    help="force torch device for OWLv2 (cuda/mps/cpu); default auto-detect")
     ap.add_argument("--no-4bit", action="store_true",
                     help="disable Qwen3-VL 4-bit quant (likely OOMs on 4080 at fp16)")
     ap.add_argument("--save-dir", type=Path, default=None,
@@ -202,12 +201,8 @@ def main() -> None:
             print(f"{label} image not found: {p}", file=sys.stderr)
             sys.exit(1)
 
-    print(f"loading OWLv2: {args.owlv2_model}")
-    finder = TargetFinder(
-        model_name=args.owlv2_model, device=args.torch_device, min_sim=args.min_sim,
-    )
-    print(f"  torch device: {finder.device}")
-    finder.load_reference(args.reference)
+    print(f"loading YOLO: {args.yolo_weights}")
+    finder = YoloFinder(weights=args.yolo_weights, min_conf=args.min_sim)
 
     print(f"loading VLMScout: {args.vlm_model} (4bit={'no' if args.no_4bit else 'yes'})")
     t_load = time.monotonic()

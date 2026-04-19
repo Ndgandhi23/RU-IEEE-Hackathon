@@ -36,7 +36,7 @@ from brain.control.loop import Action, ApproachController
 from brain.io.pi_bridge import PiBridge
 from brain.io.pi_frame_source import PiFrameSource, pi_url
 from brain.io.webcam import Webcam
-from brain.perception.target_finder import TargetFinder
+from brain.perception.yolo_finder import YoloFinder
 from brain.perception.vlm_scout import DEFAULT_MODEL as VLM_DEFAULT, VLMScout
 
 log = logging.getLogger("brain.main")
@@ -56,10 +56,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     help="use local webcam index N instead of Pi MJPEG")
     ap.add_argument("--rate-hz", type=float, default=10.0,
                     help="target loop frequency (default 10 Hz)")
-    ap.add_argument("--owlv2-model", default="google/owlv2-base-patch16-ensemble")
+    ap.add_argument("--yolo-weights", type=Path, default=Path("models/trash_v1.pt"),
+                    help="path to YOLO weights (default: models/trash_v1.pt)")
+    ap.add_argument("--yolo-min-conf", type=float, default=0.5,
+                    help="YOLO detection confidence floor (default 0.5)")
     ap.add_argument("--vlm-model", default=VLM_DEFAULT)
-    ap.add_argument("--torch-device", default=None,
-                    help="force torch device for OWLv2 (cuda/mps/cpu)")
     ap.add_argument("--no-4bit", action="store_true",
                     help="disable Qwen3-VL 4-bit quant")
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -96,10 +97,8 @@ def _main(argv: list[str] | None = None) -> int:
         return 2
 
     # ---- Perception ----
-    log.info("loading OWLv2 (%s)", args.owlv2_model)
-    finder = TargetFinder(model_name=args.owlv2_model, device=args.torch_device)
-    log.info("OWLv2 on %s", finder.device)
-    finder.load_reference(args.reference)
+    log.info("loading YOLO (%s, min_conf=%.2f)", args.yolo_weights, args.yolo_min_conf)
+    finder = YoloFinder(weights=args.yolo_weights, min_conf=args.yolo_min_conf)
 
     log.info("loading VLMScout (%s, 4bit=%s)", args.vlm_model, not args.no_4bit)
     t0 = time.monotonic()

@@ -21,11 +21,24 @@ keeps the ~1 Hz VLM from bottlenecking the ~10 Hz outer loop.
 from __future__ import annotations
 
 from enum import Enum
+from typing import Protocol
 
 import numpy as np
 
-from brain.perception.target_finder import TargetFinder
+from brain.perception.types import Detection
 from brain.perception.vlm_scout import VLMScout
+
+
+class TargetDetector(Protocol):
+    """Anything with a .detect(frame) → list[Detection] method satisfies this.
+
+    Concrete implementations in this repo:
+        brain.perception.yolo_finder.YoloFinder  (primary for the demo — trained on bottles)
+        brain.perception.target_finder.TargetFinder  (OWLv2 image-conditioned, kept for
+                                                      future disambiguation use cases)
+    """
+
+    def detect(self, frame: np.ndarray) -> list[Detection]: ...
 
 
 class Action(str, Enum):
@@ -46,7 +59,7 @@ SEARCH_FRAMES = 15         # how many rotation ticks per VLM scout call
 class ApproachController:
     def __init__(
         self,
-        target_finder: TargetFinder,
+        target_finder: TargetDetector,
         vlm_scout: VLMScout,
         reference_photo: np.ndarray | str,
         reporter_photo: np.ndarray | str,
