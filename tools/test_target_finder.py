@@ -176,6 +176,8 @@ def main() -> None:
     ap.add_argument("--frames", type=int, default=10, help="headless: number of frames to save")
     ap.add_argument("--interval", type=float, default=0.5, help="headless: seconds between saved frames")
     args = ap.parse_args()
+    # PowerShell doesn't expand ~ when passing args to subprocesses; do it here.
+    args.reference = args.reference.expanduser()
 
     if not args.reference.exists():
         print(f"reference image not found: {args.reference}", file=sys.stderr)

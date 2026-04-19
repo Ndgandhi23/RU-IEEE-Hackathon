@@ -70,6 +70,7 @@ class VLMScout:
                 load_in_4bit=True,
                 bnb_4bit_compute_dtype=torch.float16,
                 bnb_4bit_quant_type="nf4",
+                bnb_4bit_use_double_quant=True,
             )
             if load_in_4bit
             else None
@@ -113,7 +114,11 @@ class VLMScout:
             add_generation_prompt=True,
             return_dict=True,
             return_tensors="pt",
-        ).to(self.model.device)
+        )
+        # transformers main docs explicitly do this — apply_chat_template emits
+        # token_type_ids that Qwen3VLForConditionalGeneration.generate() rejects.
+        inputs.pop("token_type_ids", None)
+        inputs = inputs.to(self.model.device)
 
         with torch.no_grad():
             output_ids = self.model.generate(

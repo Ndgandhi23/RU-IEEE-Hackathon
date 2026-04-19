@@ -193,6 +193,9 @@ def main() -> None:
     ap.add_argument("--frames", type=int, default=10, help="headless: number of frames to save")
     ap.add_argument("--interval", type=float, default=0.5, help="headless: seconds between frames")
     args = ap.parse_args()
+    # PowerShell doesn't expand ~ when passing args to subprocesses; do it here.
+    args.reference = args.reference.expanduser()
+    args.context = args.context.expanduser()
 
     for label, p in (("reference", args.reference), ("context", args.context)):
         if not p.exists():

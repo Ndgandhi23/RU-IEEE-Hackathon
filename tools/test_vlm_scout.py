@@ -66,6 +66,10 @@ def main() -> None:
                     help="number of scout calls; first is cold-start, rest are steady-state")
     ap.add_argument("--max-new-tokens", type=int, default=128)
     args = ap.parse_args()
+    # PowerShell doesn't expand ~ when passing args to subprocesses; do it here.
+    args.reference = args.reference.expanduser()
+    args.context = args.context.expanduser()
+    args.live = args.live.expanduser()
 
     for label, p in (("reference", args.reference), ("context", args.context), ("live", args.live)):
         if not p.exists():
