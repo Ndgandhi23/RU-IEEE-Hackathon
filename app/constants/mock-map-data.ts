@@ -2,7 +2,11 @@ import { CampusId } from '@/constants/campuses';
 import { TrashReport } from '@/types/routing';
 
 // Toggle to disable all mock overlays at once.
-export const MOCK_MAP_DATA_ENABLED = true;
+//
+// Disabled for live test runs so only real reports submitted through the
+// relay show up on the map. Flip back to `true` to re-enable the seeded
+// singletons + hotspot clusters used during early UI development.
+export const MOCK_MAP_DATA_ENABLED = false;
 
 // Reusable photo slots for individual (singleton) markers. Replace these
 // URIs with your own local assets or hosted URLs. The same photo can be

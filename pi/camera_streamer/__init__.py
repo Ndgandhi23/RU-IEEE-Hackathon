@@ -1,7 +1,7 @@
 """Pi-side camera capture and MJPEG transmission.
 
 See `writeup/CLAUDE.md` for the big picture: this is the transmit half of the
-Pi's camera proxy. The brain machine (Mac, later Jetson) connects to
+Pi's camera proxy. The brain laptop connects to
 `http://<pi-ip>:8080/stream.mjpg` and feeds frames into the same YOLO
 `Detector` used by `demo.py`.
 """

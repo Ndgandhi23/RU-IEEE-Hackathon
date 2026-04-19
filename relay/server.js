@@ -756,37 +756,75 @@ function summarizeAppleWalkingRoute(rawRoute, transportType = APPLE_MAPS_TRANSPO
     return null;
   }
 
+  const envelope = Array.isArray(rawRoute?.data?.routes) && rawRoute.data.routes.length
+    ? rawRoute.data
+    : rawRoute;
+
   const route = extractPrimaryRoute(rawRoute);
-  const rawSteps = extractRouteSteps(route);
-  const steps = rawSteps.map((step, index) => summarizeRouteStep(step, index));
+
+  // Apple Maps Server API puts steps + polylines at the TOP level of the
+  // response and references them from each route by index:
+  //   envelope.steps:      Step[]           (pool)
+  //   envelope.stepPaths:  LatLon[][]       (pool of coordinate arrays)
+  //   route.stepIndexes:   number[]         (indices into envelope.steps)
+  //   step.stepPathIndex:  number           (index into envelope.stepPaths)
+  //
+  // We also keep the older Google-shaped fallbacks (route.steps,
+  // route.legs[].steps, step.polyline) so tests and alt providers keep
+  // working.
+  const stepsPool = Array.isArray(envelope?.steps) ? envelope.steps : [];
+  const stepPathsPool = Array.isArray(envelope?.stepPaths) ? envelope.stepPaths : [];
+
+  const stepRefs = extractRouteSteps(route, stepsPool);
+  const steps = stepRefs.map((step, index) => summarizeRouteStep(step, index, stepPathsPool));
+
   const routeWaypoints = firstNonEmptyCoordinateSeries([
     route?.waypoints,
     route?.path,
     route?.coordinates,
     route?.polyline,
-    rawRoute?.waypoints,
-    rawRoute?.path,
-    rawRoute?.coordinates,
-    rawRoute?.polyline,
+    envelope?.waypoints,
+    envelope?.path,
+    envelope?.coordinates,
+    envelope?.polyline,
     steps.flatMap((step) => step.waypoints),
+    // Last resort: flatten every stepPath Apple sent back. Even if
+    // extractRouteSteps couldn't reconstruct the step list, the polyline
+    // points still let nav compute distance/bearing.
+    stepPathsPool.flatMap((p) => (Array.isArray(p) ? p : [])),
   ]);
+
+  // Apple occasionally returns routes[].distanceMeters = 0 for very short
+  // walks even when the steps themselves carry real distances. Sum the
+  // steps as a fallback so the UI doesn't read "0.0 m" next to a 52s ETA.
+  const stepDistanceSum = steps.reduce(
+    (total, step) => (step.distanceMeters != null ? total + step.distanceMeters : total),
+    0
+  );
+  const aggregateDistance = pickNumber(
+    route?.distanceMeters,
+    route?.distance,
+    envelope?.distanceMeters,
+    envelope?.distance
+  );
+  const distanceMeters =
+    aggregateDistance != null && aggregateDistance > 0
+      ? aggregateDistance
+      : stepDistanceSum > 0
+        ? stepDistanceSum
+        : aggregateDistance; // preserves 0 / null for downstream UI
 
   return {
     provider: 'apple-maps',
     transportType,
-    distanceMeters: pickNumber(
-      route?.distanceMeters,
-      route?.distance,
-      rawRoute?.distanceMeters,
-      rawRoute?.distance
-    ),
+    distanceMeters,
     expectedTravelTimeSeconds: pickNumber(
       route?.expectedTravelTimeSeconds,
       route?.expectedTravelTime,
       route?.durationSeconds,
       route?.duration,
-      rawRoute?.expectedTravelTimeSeconds,
-      rawRoute?.expectedTravelTime
+      envelope?.expectedTravelTimeSeconds,
+      envelope?.expectedTravelTime
     ),
     waypointCount: routeWaypoints.length,
     waypoints: routeWaypoints,
@@ -794,10 +832,26 @@ function summarizeAppleWalkingRoute(rawRoute, transportType = APPLE_MAPS_TRANSPO
   };
 }
 
-function summarizeRouteStep(step, index) {
+function summarizeRouteStep(step, index, stepPathsPool = []) {
+  let waypoints = firstNonEmptyCoordinateSeries([
+    step?.waypoints,
+    step?.path,
+    step?.coordinates,
+    step?.polyline,
+  ]);
+
+  // Apple's step objects reference a polyline by index into the top-level
+  // stepPaths pool — resolve it when the step itself didn't embed one.
+  if (waypoints.length === 0 && typeof step?.stepPathIndex === 'number') {
+    const path = stepPathsPool[step.stepPathIndex];
+    waypoints = extractCoordinateSeries(path);
+  }
+
   return {
     index,
-    instruction: normalizeInstruction(step?.instructions ?? step?.instruction ?? null),
+    instruction: normalizeInstruction(
+      step?.instructions ?? step?.instruction ?? step?.stepInstruction ?? null
+    ),
     distanceMeters: pickNumber(step?.distanceMeters, step?.distance),
     expectedTravelTimeSeconds: pickNumber(
       step?.expectedTravelTimeSeconds,
@@ -805,12 +859,7 @@ function summarizeRouteStep(step, index) {
       step?.durationSeconds,
       step?.duration
     ),
-    waypoints: firstNonEmptyCoordinateSeries([
-      step?.waypoints,
-      step?.path,
-      step?.coordinates,
-      step?.polyline,
-    ]),
+    waypoints,
   };
 }
 
@@ -826,11 +875,23 @@ function extractPrimaryRoute(rawRoute) {
   return rawRoute;
 }
 
-function extractRouteSteps(route) {
+function extractRouteSteps(route, stepsPool = []) {
+  // Apple shape: route.stepIndexes -> indices into top-level steps pool.
+  if (Array.isArray(route?.stepIndexes) && stepsPool.length) {
+    const resolved = route.stepIndexes
+      .map((idx) => (Number.isInteger(idx) ? stepsPool[idx] : null))
+      .filter((step) => step && typeof step === 'object');
+    if (resolved.length) {
+      return resolved;
+    }
+  }
+
+  // Some providers inline the steps on the route itself.
   if (Array.isArray(route?.steps)) {
     return route.steps;
   }
 
+  // Google-style legs.
   if (Array.isArray(route?.legs)) {
     return route.legs.flatMap((leg) => (Array.isArray(leg?.steps) ? leg.steps : []));
   }

@@ -1,0 +1,2 @@
+pigpio==1.78
+websockets==12.0

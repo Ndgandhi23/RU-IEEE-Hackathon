@@ -6,7 +6,7 @@ Contract (from writeup/CLAUDE.md):
     GET http://<pi-ip>:8080/stream.mjpg   # multipart/x-mixed-replace MJPEG
 
 The brain's perception module reads this URL in place of a local webcam and
-feeds the frames into `jetson.perception.detector.Detector` — the same class
+feeds the frames into `brain.perception.detector.Detector` — the same class
 `demo.py` uses for the laptop smoke-test.
 
 Flags deliberately mirror `tools/live_detect.py` (--device, --width, --height)

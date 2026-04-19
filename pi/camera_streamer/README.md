@@ -3,14 +3,13 @@
 Camera capture and MJPEG transmission on the Raspberry Pi.
 
 This is the **transmit** side of the Pi camera proxy described in
-[`writeup/CLAUDE.md`](../../writeup/CLAUDE.md). The brain machine (Mac today,
-Jetson Orin Nano later) connects to this stream and feeds frames into the
-same YOLO `Detector` used by `demo.py`.
+[`writeup/CLAUDE.md`](../../writeup/CLAUDE.md). The brain laptop connects to
+this stream and feeds frames into the same YOLO `Detector` used by `demo.py`.
 
 ```
 ┌────────────────┐   USB    ┌──────────────────────────┐   HTTP/MJPEG   ┌──────────────────┐
-│ Logitech C270  ├─────────>│  Raspberry Pi 3B         ├───────────────>│  Brain machine    │
-│ 720p webcam    │          │  pi.camera_streamer       │   :8080/       │  jetson/perception │
+│ Logitech C270  ├─────────>│  Raspberry Pi 3B         ├───────────────>│  Brain laptop     │
+│ 720p webcam    │          │  pi.camera_streamer      │   :8080/       │  brain/perception │
 └────────────────┘          │  (webcam + MJPEG server) │   stream.mjpg  │  Detector (YOLO)  │
                             └──────────────────────────┘                └──────────────────┘
 ```
@@ -94,12 +93,12 @@ Browser preview: visit `http://<pi-ip>:8080/` and you'll see the live stream.
 
 ## Feeding the stream into the same classifier `demo.py` uses
 
-The classifier is `jetson.perception.detector.Detector`, which just needs BGR
+The classifier is `brain.perception.detector.Detector`, which just needs BGR
 `np.ndarray` frames. OpenCV reads MJPEG-over-HTTP natively:
 
 ```python
 import cv2
-from jetson.perception.detector import Detector
+from brain.perception.detector import Detector
 
 detector = Detector("models/trash_v1.pt")
 cap = cv2.VideoCapture("http://<pi-ip>:8080/stream.mjpg")
@@ -112,11 +111,10 @@ while True:
         print(det.class_name, det.confidence, det.xyxy)
 ```
 
-On the brain side, a module like `jetson/io/pi_frame_source.py` will wrap that
-in the same `Frame` dataclass contract the existing `jetson/io/webcam.py`
-exposes, so `tools/live_detect.py` and `demo.py` can swap local cam ↔ Pi
-stream behind a single `--source` flag. That module is out of scope here —
-this folder is the transmit half only.
+`connector/run_classifier.py` (invoked via `demo.py`) does exactly this with
+added debug overlays, per-frame metadata logging, and gating based on the
+robot's arrival state. This folder is the transmit half only — no inference
+or nav decisions live here.
 
 ## Autostart (systemd, optional)
 
