@@ -18,7 +18,7 @@ def test_every_action_has_a_mapping() -> None:
 def test_forward_is_both_positive_matched() -> None:
     left, right = pwm_for(Action.FORWARD)
     assert left > 0 and right > 0
-    assert left == right  # straight-ahead, no drift
+    assert left == right
 
 
 def test_stop_is_zero() -> None:
@@ -39,9 +39,23 @@ def test_search_is_same_sign_pattern_as_turn_but_slower() -> None:
     sl_left, sl_right = pwm_for(Action.SEARCH_LEFT)
     l_left, l_right = pwm_for(Action.LEFT)
     assert sl_left < 0 < sl_right
-    # Search rotation should be no faster than a normal turn — scanning is slow.
     assert abs(sl_left) <= abs(l_left)
     assert abs(sl_right) <= abs(l_right)
+
+
+def test_scoop_forward_is_positive_and_more_controlled_than_cruise() -> None:
+    scoop_left, scoop_right = pwm_for(Action.SCOOP_FORWARD)
+    fwd_left, fwd_right = pwm_for(Action.FORWARD)
+    assert scoop_left > 0 and scoop_right > 0
+    assert scoop_left == scoop_right
+    assert abs(scoop_left) < abs(fwd_left)
+    assert abs(scoop_right) < abs(fwd_right)
+
+
+def test_backup_is_matched_reverse() -> None:
+    left, right = pwm_for(Action.BACKUP)
+    assert left < 0 and right < 0
+    assert left == right
 
 
 def test_all_pwms_within_pi_motor_range() -> None:

@@ -1,10 +1,10 @@
-"""End-to-end brain validation on a webcam — no Pi, no motors.
+"""End-to-end brain validation on a webcam: no Pi, no motors.
 
 Wires YoloFinder (trash_v1.pt) + VLMScout (Qwen3-VL) + ApproachController
 into the same decision loop the robot will use. Prints the discrete Action for
-each frame, overlays it on the webcam preview, and color-codes the frame
-border so you can eyeball what the controller is deciding from across the
-room.
+each frame, overlays the action + controller phase on the webcam preview, and
+color-codes the frame border so you can eyeball what the controller is
+deciding from across the room.
 
 Usage:
     python tools/test_approach.py --reference ref_crop.jpg --context wider.jpg
@@ -16,9 +16,9 @@ Usage:
     python tools/test_approach.py --reference r.jpg --context c.jpg \
         --save-dir /tmp/approach --frames 30 --interval 0.5
 
-First run downloads OWLv2 (~300 MB) + Qwen3-VL-8B (~5 GB) from HuggingFace.
+First run downloads Qwen3-VL-8B from HuggingFace.
 
-Press 'q' to quit, 's' to save the current annotated frame.
+Press "q" to quit, "s" to save the current annotated frame.
 """
 from __future__ import annotations
 
@@ -32,16 +32,16 @@ import cv2
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from brain.control.loop import Action, ApproachController
 from brain.io.webcam import Webcam
-from brain.perception.yolo_finder import YoloFinder
 from brain.perception.types import Detection
 from brain.perception.vlm_scout import DEFAULT_MODEL as VLM_DEFAULT, VLMScout
+from brain.perception.yolo_finder import YoloFinder
 
 # BGR tuples
-_COLOR_FORWARD = (0, 220, 0)       # green
-_COLOR_TURN = (0, 220, 220)        # yellow
-_COLOR_STOP = (0, 0, 220)          # red
-_COLOR_SEARCH = (220, 0, 220)      # magenta
-_COLOR_BBOX = (255, 255, 0)        # cyan — OWLv2 target box
+_COLOR_FORWARD = (0, 220, 0)
+_COLOR_TURN = (0, 220, 220)
+_COLOR_STOP = (0, 0, 220)
+_COLOR_SEARCH = (220, 0, 220)
+_COLOR_BBOX = (255, 255, 0)
 
 _ACTION_COLOR: dict[Action, tuple[int, int, int]] = {
     Action.FORWARD: _COLOR_FORWARD,
@@ -50,33 +50,40 @@ _ACTION_COLOR: dict[Action, tuple[int, int, int]] = {
     Action.STOP: _COLOR_STOP,
     Action.SEARCH_LEFT: _COLOR_SEARCH,
     Action.SEARCH_RIGHT: _COLOR_SEARCH,
+    Action.SCOOP_FORWARD: (255, 140, 0),
+    Action.BACKUP: (120, 120, 255),
 }
 
 
 def draw(
     frame,
+    phase: str,
     action: Action,
     top_detection: Detection | None,
     fps: float,
-    owlv2_ms: float,
+    yolo_ms: float,
 ) -> None:
     h, w = frame.shape[:2]
     color = _ACTION_COLOR[action]
 
-    # Color-coded frame border (thicker = more attention-grabbing)
     cv2.rectangle(frame, (0, 0), (w - 1, h - 1), color, 12)
 
-    # Top-scoring OWLv2 bbox if we had one (helps sanity-check the controller)
     if top_detection is not None:
         x1, y1, x2, y2 = top_detection.xyxy
         cv2.rectangle(frame, (x1, y1), (x2, y2), _COLOR_BBOX, 2)
-        label = f"target {top_detection.confidence:.2f}"
+        label = f"{top_detection.class_name} {top_detection.confidence:.2f}"
         (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
         cv2.rectangle(frame, (x1, y1 - th - 6), (x1 + tw + 4, y1), _COLOR_BBOX, -1)
-        cv2.putText(frame, label, (x1 + 2, y1 - 3),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 2)
+        cv2.putText(
+            frame,
+            label,
+            (x1 + 2, y1 - 3),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (0, 0, 0),
+            2,
+        )
 
-    # Big action label centered near the top
     text = action.name
     (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 1.4, 3)
     tx = (w - tw) // 2
@@ -84,12 +91,21 @@ def draw(
     cv2.rectangle(frame, (tx - 12, ty - th - 12), (tx + tw + 12, ty + 12), (0, 0, 0), -1)
     cv2.putText(frame, text, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 1.4, color, 3)
 
-    # FPS + OWLv2 inference cost in the corner
-    hud = f"{fps:.1f} fps  owlv2 {owlv2_ms:.0f}ms"
+    cv2.putText(
+        frame,
+        f"phase: {phase}",
+        (10, 32),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        color,
+        2,
+    )
+
+    hud = f"{fps:.1f} fps  yolo {yolo_ms:.0f}ms"
     cv2.putText(frame, hud, (10, h - 14), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
 
-def run_interactive(cam: Webcam, controller: ApproachController, finder: TargetFinder) -> None:
+def run_interactive(cam: Webcam, controller: ApproachController, finder: YoloFinder) -> None:
     last_idx = -1
     fps_window: list[float] = []
     t_prev = time.monotonic()
@@ -103,12 +119,9 @@ def run_interactive(cam: Webcam, controller: ApproachController, finder: TargetF
         last_idx = frame_pkt.index
         img = frame_pkt.image.copy()
 
-        # Peek at OWLv2 separately so we can show the bbox AND time the call.
-        # Controller.step calls detect() again internally — that's fine for a
-        # test harness, we care about correctness, not per-frame efficiency.
         t0 = time.monotonic()
         detections = finder.detect(img)
-        owlv2_ms = (time.monotonic() - t0) * 1000
+        yolo_ms = (time.monotonic() - t0) * 1000
         action = controller.step(frame_pkt.image)
 
         now = time.monotonic()
@@ -119,10 +132,14 @@ def run_interactive(cam: Webcam, controller: ApproachController, finder: TargetF
         fps = len(fps_window) / sum(fps_window) if fps_window else 0
 
         top = detections[0] if detections else None
-        draw(img, action, top, fps, owlv2_ms)
+        draw(img, controller.phase.value, action, top, fps, yolo_ms)
         cv2.imshow("approach controller (q quit, s save)", img)
         conf_str = f"{top.confidence:.2f}" if top is not None else "none"
-        print(f"  frame {last_idx}  action={action.name}  top={conf_str}", flush=True)
+        print(
+            f"  frame {last_idx}  phase={controller.phase.value}  "
+            f"action={action.name}  top={conf_str}",
+            flush=True,
+        )
 
         key = cv2.waitKey(1) & 0xFF
         if key == ord("q"):
@@ -137,7 +154,7 @@ def run_interactive(cam: Webcam, controller: ApproachController, finder: TargetF
 def run_headless(
     cam: Webcam,
     controller: ApproachController,
-    finder: TargetFinder,
+    finder: YoloFinder,
     save_dir: Path,
     frames: int,
     interval_s: float,
@@ -156,16 +173,19 @@ def run_headless(
 
         t0 = time.monotonic()
         detections = finder.detect(img)
-        owlv2_ms = (time.monotonic() - t0) * 1000
+        yolo_ms = (time.monotonic() - t0) * 1000
         action = controller.step(frame_pkt.image)
         top = detections[0] if detections else None
 
-        draw(img, action, top, 0.0, owlv2_ms)
+        draw(img, controller.phase.value, action, top, 0.0, yolo_ms)
         out = save_dir / f"approach_{saved:03d}.jpg"
         cv2.imwrite(str(out), img)
         conf = f"{top.confidence:.2f}" if top else "none"
-        print(f"  {out.name}: action={action.name}  top={conf}  owlv2={owlv2_ms:.0f}ms",
-              flush=True)
+        print(
+            f"  {out.name}: phase={controller.phase.value} action={action.name} "
+            f"top={conf} yolo={yolo_ms:.0f}ms",
+            flush=True,
+        )
         saved += 1
         if interval_s > 0 and saved < frames:
             time.sleep(interval_s)
@@ -174,31 +194,40 @@ def run_headless(
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--reference", type=Path, required=True,
-                    help="tight crop of the target (reporter's photo, cropped)")
-    ap.add_argument("--context", type=Path, required=True,
-                    help="wider reporter photo with surroundings (for VLM scout)")
+    ap.add_argument("--reference", type=Path, required=True, help="tight crop of the target")
+    ap.add_argument("--context", type=Path, required=True, help="wider reporter photo")
     ap.add_argument("--device", type=int, default=0, help="webcam index")
     ap.add_argument("--width", type=int, default=1280)
     ap.add_argument("--height", type=int, default=720)
     ap.add_argument("--min-sim", type=float, default=0.5, help="YOLO confidence floor")
-    ap.add_argument("--yolo-weights", type=Path, default=Path("models/trash_v1.pt"),
-                    help="path to YOLO weights")
+    ap.add_argument(
+        "--yolo-weights",
+        type=Path,
+        default=Path("models/trash_v1.pt"),
+        help="path to YOLO weights",
+    )
     ap.add_argument("--vlm-model", default=VLM_DEFAULT)
-    ap.add_argument("--no-4bit", action="store_true",
-                    help="disable Qwen3-VL 4-bit quant (likely OOMs on 4080 at fp16)")
-    ap.add_argument("--save-dir", type=Path, default=None,
-                    help="headless: write annotated frames here instead of opening a window")
+    ap.add_argument(
+        "--no-4bit",
+        action="store_true",
+        help="disable Qwen3-VL 4-bit quant (likely OOMs on a 4080 at fp16)",
+    )
+    ap.add_argument(
+        "--save-dir",
+        type=Path,
+        default=None,
+        help="headless: write annotated frames here instead of opening a window",
+    )
     ap.add_argument("--frames", type=int, default=10, help="headless: number of frames to save")
     ap.add_argument("--interval", type=float, default=0.5, help="headless: seconds between frames")
     args = ap.parse_args()
-    # PowerShell doesn't expand ~ when passing args to subprocesses; do it here.
+
     args.reference = args.reference.expanduser()
     args.context = args.context.expanduser()
 
-    for label, p in (("reference", args.reference), ("context", args.context)):
-        if not p.exists():
-            print(f"{label} image not found: {p}", file=sys.stderr)
+    for label, path in (("reference", args.reference), ("context", args.context)):
+        if not path.exists():
+            print(f"{label} image not found: {path}", file=sys.stderr)
             sys.exit(1)
 
     print(f"loading YOLO: {args.yolo_weights}")
@@ -217,7 +246,7 @@ def main() -> None:
     )
 
     with Webcam(device=args.device, width=args.width, height=args.height) as cam:
-        time.sleep(0.5)  # camera warmup
+        time.sleep(0.5)
         if args.save_dir is not None:
             run_headless(cam, controller, finder, args.save_dir, args.frames, args.interval)
         else:

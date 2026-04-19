@@ -14,6 +14,8 @@ Differential drive:
     FORWARD       — both positive, matched magnitude → straight ahead
     LEFT / RIGHT  — opposite signs, lower magnitude → pivot in place
     SEARCH_*      — opposite signs, even lower magnitude → slow scan rotation
+    SCOOP_FORWARD — both positive, slower than FORWARD → controlled shove
+    BACKUP        — both negative, matched magnitude → reset after failed scoop
     STOP          — zero
 """
 from __future__ import annotations
@@ -27,6 +29,8 @@ ACTION_TO_PWM: dict[Action, tuple[int, int]] = {
     Action.STOP:         (0, 0),
     Action.SEARCH_LEFT:  (-80,  +80),
     Action.SEARCH_RIGHT: (+80,  -80),
+    Action.SCOOP_FORWARD: (+110, +110),
+    Action.BACKUP:       (-90, -90),
 }
 
 

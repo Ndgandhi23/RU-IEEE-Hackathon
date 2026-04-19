@@ -1,22 +1,20 @@
-"""Approach-phase control loop: orchestrates OWLv2 (fast) + Qwen3-VL (slow).
+"""Approach-phase control loop: nearby search, visual approach, scoop, verify.
 
-Each call to `step(frame)` returns one discrete `Action` for the motor layer
-to execute. The state machine calls this every tick during the combined
-SEARCHING/APPROACHING phases.
+Each call to ``step(frame)`` returns one discrete ``Action`` for the motor
+layer. The current demo uses the trained YOLO bottle/can detector as the fast
+path and falls back to the VLM scout only when the target is not visible.
 
-Fast path (OWLv2 finds the target):
-    bbox area  > STOP_AREA_FRAC * frame_area  →  STOP
-    |err_frac| < ALIGN_TOLERANCE               →  FORWARD
-    bbox left of center                        →  LEFT
-    bbox right of center                       →  RIGHT
+State flow:
+    SEARCHING       -> VLM-guided scan bursts when YOLO is empty
+    APPROACHING     -> steer toward the top bottle/can detection
+    SCOOP_PUSH      -> short low-speed forward shove into the passive scoop
+    VERIFYING       -> hold still and confirm the target disappeared
+    RECOVERING      -> short reverse to reset for another attempt
+    COLLECTED       -> hold STOP forever
 
-Slow path (OWLv2 returns nothing):
-    If a search rotation is already queued, continue rotating.
-    Otherwise call the VLM once, queue `SEARCH_FRAMES` rotation ticks in the
-    direction the VLM returns, then resume at the top.
-
-The VLM is called at most once per SEARCH_FRAMES-long burst — that's what
-keeps the ~1 Hz VLM from bottlenecking the ~10 Hz outer loop.
+This stays intentionally discrete because the Pi contract is left/right PWM,
+not velocity setpoints. ``servo.py`` still exists for future smooth-control
+work, but the current field path is coarse actions plus timing.
 """
 from __future__ import annotations
 
@@ -30,12 +28,11 @@ from brain.perception.vlm_scout import VLMScout
 
 
 class TargetDetector(Protocol):
-    """Anything with a .detect(frame) → list[Detection] method satisfies this.
+    """Anything with a ``detect(frame) -> list[Detection]`` method satisfies this.
 
     Concrete implementations in this repo:
-        brain.perception.yolo_finder.YoloFinder  (primary for the demo — trained on bottles)
-        brain.perception.target_finder.TargetFinder  (OWLv2 image-conditioned, kept for
-                                                      future disambiguation use cases)
+        brain.perception.yolo_finder.YoloFinder    (primary for nearby bottle/can pickup)
+        brain.perception.target_finder.TargetFinder (image-guided fallback for future use)
     """
 
     def detect(self, frame: np.ndarray) -> list[Detection]: ...
@@ -48,12 +45,29 @@ class Action(str, Enum):
     STOP = "stop"
     SEARCH_LEFT = "search_left"
     SEARCH_RIGHT = "search_right"
+    SCOOP_FORWARD = "scoop_forward"
+    BACKUP = "backup"
+
+
+class ApproachPhase(str, Enum):
+    SEARCHING = "searching"
+    APPROACHING = "approaching"
+    SCOOP_PUSH = "scoop_push"
+    VERIFYING = "verifying"
+    RECOVERING = "recovering"
+    COLLECTED = "collected"
 
 
 # Tuning constants
-STOP_AREA_FRAC = 0.15      # fraction of frame area that triggers STOP
-ALIGN_TOLERANCE = 0.15     # |err_frac| ≤ this → drive FORWARD instead of turning
-SEARCH_FRAMES = 15         # how many rotation ticks per VLM scout call
+PICKUP_AREA_FRAC = 0.15          # fraction of frame area that triggers scoop
+ALIGN_TOLERANCE = 0.15           # |err_frac| <= this -> drive FORWARD instead of turning
+PICKUP_ALIGN_TOLERANCE = 0.10    # tighter centering gate before entering scoop
+SEARCH_FRAMES = 15               # how many rotation ticks per VLM scout call
+SCOOP_FRAMES = 8                 # short shove into the passive scoop
+VERIFY_FRAMES = 6                # dwell frames to check whether the target vanished
+VERIFY_CLEAR_FRAMES = 3          # consecutive empty frames required for success
+RECOVERY_BACKUP_FRAMES = 4       # reverse a little before retrying
+STOP_AREA_FRAC = PICKUP_AREA_FRAC  # backwards-compatible alias
 
 
 class ApproachController:
@@ -63,9 +77,14 @@ class ApproachController:
         vlm_scout: VLMScout,
         reference_photo: np.ndarray | str,
         reporter_photo: np.ndarray | str,
-        stop_area_frac: float = STOP_AREA_FRAC,
+        stop_area_frac: float = PICKUP_AREA_FRAC,
         align_tolerance: float = ALIGN_TOLERANCE,
+        pickup_align_tolerance: float = PICKUP_ALIGN_TOLERANCE,
         search_frames: int = SEARCH_FRAMES,
+        scoop_frames: int = SCOOP_FRAMES,
+        verify_frames: int = VERIFY_FRAMES,
+        verify_clear_frames: int = VERIFY_CLEAR_FRAMES,
+        recovery_backup_frames: int = RECOVERY_BACKUP_FRAMES,
     ) -> None:
         self.target_finder = target_finder
         self.vlm_scout = vlm_scout
@@ -73,38 +92,119 @@ class ApproachController:
         self.reporter_photo = reporter_photo
         self.stop_area_frac = stop_area_frac
         self.align_tolerance = align_tolerance
+        self.pickup_align_tolerance = pickup_align_tolerance
         self.search_frames = search_frames
+        self.scoop_frames = scoop_frames
+        self.verify_frames = verify_frames
+        self.verify_clear_frames = verify_clear_frames
+        self.recovery_backup_frames = recovery_backup_frames
+
+        self._phase = ApproachPhase.SEARCHING
+        self._pickup_complete = False
 
         self._search_remaining = 0
         self._search_direction: str | None = None
+        self._scoop_remaining = 0
+        self._verify_remaining = 0
+        self._verify_clear_streak = 0
+        self._recovery_remaining = 0
+
+    @property
+    def phase(self) -> ApproachPhase:
+        return self._phase
+
+    @property
+    def pickup_complete(self) -> bool:
+        return self._pickup_complete
 
     def step(self, frame: np.ndarray) -> Action:
-        """Decide what the robot should do this tick. Pure function of inputs
-        + the internal search-burst counter."""
-        h, w = frame.shape[:2]
-        frame_area = h * w
+        """Decide what the robot should do this tick."""
+        if self._pickup_complete:
+            self._phase = ApproachPhase.COLLECTED
+            return Action.STOP
 
         detections = self.target_finder.detect(frame)
+        top = detections[0] if detections else None
 
-        # --- Fast path: OWLv2 sees the target ---
-        if detections:
-            # Cancel any ongoing search rotation — we found it.
-            self._search_remaining = 0
-            self._search_direction = None
+        if self._phase == ApproachPhase.SCOOP_PUSH:
+            return self._step_scoop_push(top)
+        if self._phase == ApproachPhase.VERIFYING:
+            return self._step_verifying(top)
+        if self._phase == ApproachPhase.RECOVERING:
+            return self._step_recovering()
 
-            top = detections[0]
-            x1, y1, x2, y2 = top.xyxy
-            bbox_area = max(0, x2 - x1) * max(0, y2 - y1)
-            if bbox_area / frame_area > self.stop_area_frac:
-                return Action.STOP
+        if top is not None:
+            return self._step_approach(frame, top)
+        return self._step_search(frame)
 
-            cx = (x1 + x2) / 2.0
-            err_frac = (cx - w / 2.0) / (w / 2.0)
-            if abs(err_frac) < self.align_tolerance:
-                return Action.FORWARD
-            return Action.RIGHT if err_frac > 0 else Action.LEFT
+    def _step_scoop_push(self, top: Detection | None) -> Action:
+        if self._scoop_remaining > 0:
+            self._scoop_remaining -= 1
+            return Action.SCOOP_FORWARD
 
-        # --- Slow path: still rotating from a prior VLM scout ---
+        self._phase = ApproachPhase.VERIFYING
+        self._verify_remaining = self.verify_frames
+        self._verify_clear_streak = 0
+        return self._step_verifying(top)
+
+    def _step_verifying(self, top: Detection | None) -> Action:
+        if top is None:
+            self._verify_clear_streak += 1
+        else:
+            self._verify_clear_streak = 0
+
+        if self._verify_clear_streak >= self.verify_clear_frames:
+            self._pickup_complete = True
+            self._phase = ApproachPhase.COLLECTED
+            return Action.STOP
+
+        if self._verify_remaining > 0:
+            self._verify_remaining -= 1
+            return Action.STOP
+
+        self._phase = ApproachPhase.RECOVERING
+        self._recovery_remaining = self.recovery_backup_frames
+        self._search_remaining = 0
+        self._search_direction = None
+        return self._step_recovering()
+
+    def _step_recovering(self) -> Action:
+        if self._recovery_remaining > 0:
+            self._recovery_remaining -= 1
+            return Action.BACKUP
+
+        self._phase = ApproachPhase.SEARCHING
+        return Action.STOP
+
+    def _step_approach(self, frame: np.ndarray, top: Detection) -> Action:
+        self._search_remaining = 0
+        self._search_direction = None
+        self._phase = ApproachPhase.APPROACHING
+
+        h, w = frame.shape[:2]
+        frame_area = h * w
+        x1, _y1, x2, _y2 = top.xyxy
+        bbox_area = top.area
+
+        cx = (x1 + x2) / 2.0
+        err_frac = (cx - w / 2.0) / (w / 2.0)
+        bbox_frac = bbox_area / frame_area if frame_area > 0 else 0.0
+
+        if (
+            bbox_frac > self.stop_area_frac
+            and abs(err_frac) < self.pickup_align_tolerance
+        ):
+            self._phase = ApproachPhase.SCOOP_PUSH
+            self._scoop_remaining = max(0, self.scoop_frames - 1)
+            return Action.SCOOP_FORWARD
+
+        if abs(err_frac) < self.align_tolerance:
+            return Action.FORWARD
+        return Action.RIGHT if err_frac > 0 else Action.LEFT
+
+    def _step_search(self, frame: np.ndarray) -> Action:
+        self._phase = ApproachPhase.SEARCHING
+
         if self._search_remaining > 0:
             self._search_remaining -= 1
             return (
@@ -112,11 +212,9 @@ class ApproachController:
                 else Action.SEARCH_RIGHT
             )
 
-        # --- Slow path: query the VLM for a fresh direction ---
         result = self.vlm_scout.scout(frame, self.reference_photo, self.reporter_photo)
         self._search_direction = result.direction
-        # This tick counts as the first rotation frame; queue the remaining.
-        self._search_remaining = self.search_frames - 1
+        self._search_remaining = max(0, self.search_frames - 1)
         return (
             Action.SEARCH_LEFT if result.direction == "left"
             else Action.SEARCH_RIGHT
