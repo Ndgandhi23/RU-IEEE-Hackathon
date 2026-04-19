@@ -65,20 +65,27 @@ We previously considered splitting perception (4080) and nav (4070) across two d
 ### 1. Verify the YOLO model works on real-world frames (~30 min)
 Run `python demo.py`, hold up a bottle and a can, confirm detection works. If `bottle` confidence is reliably >0.8 under your lighting, the model is good. If not, flag it — we may need imgsz or conf tuning.
 
-### 2. OWLv2 target finder — **scaffolded, not yet validated on GPU**
-[brain/perception/target_finder.py](brain/perception/target_finder.py) — image-conditioned detector. Wraps `google/owlv2-base-patch16-ensemble` via HuggingFace `transformers`. API:
-- `load_reference(crop: np.ndarray | Path | str)` — set the reference image
-- `detect(frame: np.ndarray) -> list[Detection]` — run image-guided detection, return boxes sorted by similarity (descending)
-- Threshold via `TARGET_MIN_SIM` (start 0.3). Reuses `Detection` dataclass from `detector.py`.
+### 2. Hybrid perception + control pipeline — **scaffolded, not yet GPU-validated**
 
-Smoke test with webcam + a reference image:
+Two models, one controller:
+
+- **[brain/perception/target_finder.py](brain/perception/target_finder.py)** — fast path. OWLv2 (`google/owlv2-base-patch16`) image-conditioned detection. When it finds the target, bbox feeds the controller directly. ~25 FPS on a 4080.
+- **[brain/perception/vlm_scout.py](brain/perception/vlm_scout.py)** — slow path. Qwen3-VL-8B at 4-bit (`Qwen/Qwen3-VL-8B-Instruct`). Called only when OWLv2 returns empty. Sees reference crop + reporter's original wider photo + live frame, returns `"left"` or `"right"` with a rationale. ~1–2 Hz.
+- **[brain/control/loop.py](brain/control/loop.py)** — orchestrator. `ApproachController.step(frame) -> Action`. Action is one of `FORWARD | LEFT | RIGHT | STOP | SEARCH_LEFT | SEARCH_RIGHT`. OWLv2 every frame; if empty, queue a 15-frame burst of SEARCH rotations in the VLM's direction before asking again.
+
+Tests: 25 unit tests pass (12 servo + 13 control loop). Control loop tests mock both models, no GPU needed.
+
+Smoke test with webcam + reference image:
 ```bash
-pip install -r requirements.txt   # transformers + Pillow added
+pip install -r requirements.txt   # transformers, bitsandbytes, accelerate, Pillow
 python tools/test_target_finder.py --reference path/to/query.jpg
-# first run downloads OWLv2 weights (~300 MB) to HF cache
+# first run downloads OWLv2 weights (~300 MB)
 ```
 
-Auto-picks device: cuda → mps → cpu. On the 4080 brain, expect 25+ FPS. On a Mac without CUDA/MPS, ~1–2 FPS (fine for validation, not for running the loop).
+Remaining integration work before this is demo-able:
+- Glue script that wires `Webcam` → `ApproachController` → prints/sends Actions
+- Map `Action` enum to motor PWM (simple: FORWARD=(+150,+150), LEFT=(-100,+100), STOP=(0,0), etc.) once the Pi bridge exists
+- GPU validation: load Qwen3-VL-8B on the 4080 and verify JSON output reliability
 
 ### 3. Pi-side motor controller + streaming (new code, ~2 hr)
 Create `pi/motor_controller/main.py` on the Pi:
@@ -145,7 +152,10 @@ RU-IEEE-Hackathon/
 │   ├── nav/geo.py           # ✓ built
 │   ├── io/webcam.py         # ✓ built
 │   ├── perception/detector.py       # ✓ built (YOLOv8n for obstacles / general)
-│   ├── perception/target_finder.py  # ✓ scaffolded (OWLv2 image-conditioned target finder) — needs GPU validation
+│   ├── perception/target_finder.py  # ✓ scaffolded (OWLv2 fast path) — needs GPU validation
+│   ├── perception/vlm_scout.py      # ✓ scaffolded (Qwen3-VL-8B @4-bit slow path) — needs GPU validation
+│   ├── perception/servo.py          # ✓ built (continuous servo decision, unit-tested)
+│   ├── control/loop.py              # ✓ built (ApproachController, 13 unit tests)
 │   ├── io/pi_bridge.py      # TODO
 │   ├── io/iphone_listener.py # TODO
 │   └── main.py              # TODO (state machine)

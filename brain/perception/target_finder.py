@@ -18,7 +18,7 @@ from transformers import Owlv2ForObjectDetection, Owlv2Processor
 
 from brain.perception.types import Detection
 
-DEFAULT_MODEL = "google/owlv2-base-patch16-ensemble"
+DEFAULT_MODEL = "google/owlv2-base-patch16"
 TARGET_MIN_SIM = 0.3
 NMS_THRESHOLD = 0.3
 
