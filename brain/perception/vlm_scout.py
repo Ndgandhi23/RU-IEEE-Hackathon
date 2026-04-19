@@ -95,8 +95,13 @@ class VLMScout:
         ctx = _to_pil(reporter_photo)
         live = _to_pil(frame)
 
+        # Newer transformers require BOTH system and user content to be a list
+        # of typed content blocks (not a raw string for system).
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {
+                "role": "system",
+                "content": [{"type": "text", "text": SYSTEM_PROMPT}],
+            },
             {
                 "role": "user",
                 "content": [
