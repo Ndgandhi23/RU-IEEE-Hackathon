@@ -12,8 +12,7 @@ Motor control + encoder telemetry on the Raspberry Pi. Sibling of
                                  + 20Hz state         │              │
                                                       │              │
                                                L298N  │              │ encoder
-                                               IN1-4, │              │ A/B (x2)
-                                               ENA/B  │              │
+                                               IN1-4  │              │ A/B (x2)
                                                       ▼              ▼
                                                ┌─────────┐    ┌──────────────┐
                                                │ NeveRest│    │ encoders on  │
@@ -71,16 +70,20 @@ in telemetry lets the brain know before it commits to a new maneuver.
 Default pin map (override in `config.py` or by editing the `@dataclass`
 defaults):
 
-**L298N motor driver** — 6 GPIOs, all digital except ENA/ENB:
+**L298N motor driver** — assume **ENA** and **ENB** are strapped high on the
+board. The Pi only needs the four direction pins:
 
 | Function | GPIO (BCM) | Goes to... |
 |---|---|---|
 | Left motor IN1  | 17  | L298N IN1 |
 | Left motor IN2  | 27  | L298N IN2 |
-| Left motor ENA  | 12  | L298N ENA (HW PWM) |
 | Right motor IN3 | 22  | L298N IN3 |
 | Right motor IN4 | 23  | L298N IN4 |
-| Right motor ENB | 13  | L298N ENB (HW PWM) |
+
+If your module exposes ENA / ENB jumpers, leave them installed so each
+channel stays enabled. The software now PWM-controls the active direction pin
+instead of ENA / ENB, so you do not need dedicated PWM wiring for the enable
+pins.
 
 **Encoders** — 4-pin hall-effect quadrature (V+, GND, A, B). Power them
 from the Pi's 3.3V rail so A/B swing 0..3.3V and go straight into GPIO —
@@ -131,7 +134,7 @@ reproduced in `config.py > COUNTS_PER_OUTPUT_REV` for reference.
 ### Direction convention
 
 Positive encoder counts correspond to **A leading B**. Positive commanded
-PWM drives **IN1=H, IN2=L**. If your first smoke test shows encoder counts
+speed drives **IN1=PWM, IN2=L**. If your first smoke test shows encoder counts
 going negative when you expected positive, either:
 
 1. Swap `a` and `b` in the relevant `EncoderPins(...)` in `config.py`, **or**
@@ -169,7 +172,7 @@ python -m pi.motor_controller --mock
 # INFO: websocket server listening on ws://0.0.0.0:8765
 ```
 
-Mock encoders *integrate commanded PWM over time*, so drive commands
+Mock encoders *integrate commanded speed values over time*, so drive commands
 produce believable monotonic tick counts without any hardware.
 
 ## Smoke-testing from your laptop

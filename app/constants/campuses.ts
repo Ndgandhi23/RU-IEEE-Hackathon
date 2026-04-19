@@ -21,6 +21,8 @@ export type CampusDefinition = {
   };
 };
 
+export const DEFAULT_CAMPUS_BOUNDARY_MARGIN_DEGREES = 0.0015;
+
 // Bounding boxes and region centers are inferred from Rutgers–New Brunswick
 // campus maps. Cook/Douglass is intentionally excluded.
 export const CAMPUSES: CampusDefinition[] = [
@@ -82,4 +84,41 @@ export const CAMPUSES: CampusDefinition[] = [
 
 export function getCampusById(id: CampusId) {
   return CAMPUSES.find((campus) => campus.id === id) ?? CAMPUSES[0];
+}
+
+export function isLocationWithinCampus(
+  location: { latitude: number; longitude: number },
+  campus: CampusDefinition,
+  marginDegrees = 0
+) {
+  const { minLat, maxLat, minLon, maxLon } = campus.boundingBox;
+  return (
+    location.latitude >= minLat - marginDegrees &&
+    location.latitude <= maxLat + marginDegrees &&
+    location.longitude >= minLon - marginDegrees &&
+    location.longitude <= maxLon + marginDegrees
+  );
+}
+
+export function findCampusForLocation(
+  location: { latitude: number; longitude: number },
+  marginDegrees = DEFAULT_CAMPUS_BOUNDARY_MARGIN_DEGREES
+) {
+  const boundedMatch = CAMPUSES.find((campus) =>
+    isLocationWithinCampus(location, campus, marginDegrees)
+  );
+
+  if (boundedMatch) {
+    return boundedMatch;
+  }
+
+  return CAMPUSES.reduce((closest, campus) => {
+    const closestDistance =
+      (closest.region.latitude - location.latitude) ** 2 +
+      (closest.region.longitude - location.longitude) ** 2;
+    const campusDistance =
+      (campus.region.latitude - location.latitude) ** 2 +
+      (campus.region.longitude - location.longitude) ** 2;
+    return campusDistance < closestDistance ? campus : closest;
+  }, CAMPUSES[0]);
 }

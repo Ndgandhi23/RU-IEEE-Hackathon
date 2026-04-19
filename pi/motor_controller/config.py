@@ -5,10 +5,12 @@ environment variables at startup (see `__main__.py`) or by editing this file
 to match your wiring.
 
 Default choices:
-- ENA / ENB are on GPIO 12 and 13, which are hardware-PWM-capable on the Pi.
-  Hardware PWM is glitch-free and doesn't consume CPU, which matters when
-  the rest of the Pi is busy serving MJPEG + running the encoder callbacks.
-- Direction pins (IN1..IN4) are plain digital outputs.
+- The code assumes ENA / ENB are strapped high on the L298N, so speed control
+  is applied by PWM-ing the active direction input pin instead of the enable
+  pin. That keeps the motor protocol unchanged while matching a jumper-wire /
+  always-enabled bring-up harness.
+- Direction pins (IN1..IN4) are therefore both direction selectors and PWM
+  targets.
 - Encoder pins avoid the default I2C (2, 3), SPI (8, 9, 10, 11), and serial
   (14, 15) pins so those buses remain free if we ever add an IMU / LCD / etc.
 
@@ -35,7 +37,7 @@ from dataclasses import dataclass
 class MotorPins:
     in1: int     # L298N IN (direction pin 1)
     in2: int     # L298N IN (direction pin 2)
-    enable: int  # L298N ENA/ENB (PWM speed)
+    enable: int | None = None  # optional ENA/ENB GPIO if not hard-wired high
 
 
 @dataclass(frozen=True)
@@ -46,8 +48,8 @@ class EncoderPins:
 
 # --- Sensible defaults (edit for your wiring) ---------------------------------
 
-LEFT_MOTOR = MotorPins(in1=17, in2=27, enable=12)
-RIGHT_MOTOR = MotorPins(in1=22, in2=23, enable=13)
+LEFT_MOTOR = MotorPins(in1=17, in2=27, enable=None)
+RIGHT_MOTOR = MotorPins(in1=22, in2=23, enable=None)
 
 LEFT_ENCODER = EncoderPins(a=5, b=6)
 RIGHT_ENCODER = EncoderPins(a=19, b=26)

@@ -29,7 +29,14 @@ import Animated, {
 } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { CAMPUSES, CampusDefinition, getCampusById } from '@/constants/campuses';
+import {
+  CAMPUSES,
+  CampusDefinition,
+  DEFAULT_CAMPUS_BOUNDARY_MARGIN_DEGREES,
+  findCampusForLocation,
+  getCampusById,
+  isLocationWithinCampus,
+} from '@/constants/campuses';
 import {
   getAllMockSingletons,
   getMockHotspotsForCampus,
@@ -37,7 +44,7 @@ import {
   MockHotspot,
 } from '@/constants/mock-map-data';
 import { useReporterContext } from '@/context/reporter-context';
-import { Coordinates, TrashReport } from '@/types/routing';
+import { TrashReport } from '@/types/routing';
 
 type CampusMetrics = {
   total: number;
@@ -46,6 +53,7 @@ type CampusMetrics = {
 };
 
 const MAX_SINGLETON_MARKERS = 5;
+const MAP_REPORT_BOUNDARY_MARGIN_DEGREES = DEFAULT_CAMPUS_BOUNDARY_MARGIN_DEGREES;
 
 const PANEL_SIDE_PADDING = 14;
 const PANEL_BUTTON_SIZE = 44;
@@ -60,9 +68,10 @@ const ANIMATION_DURATION = 520;
 
 export default function ReporterMapScreen() {
   const mapRef = useRef<MapView | null>(null);
+  const lastFocusedSubmissionIdRef = useRef<string | null>(null);
   const insets = useSafeAreaInsets();
   const { width: windowWidth } = useWindowDimensions();
-  const { selectedCampusId, reportFeed } = useReporterContext();
+  const { selectedCampusId, reportFeed, submittedReport } = useReporterContext();
   const [metricsOpen, setMetricsOpen] = useState(false);
   const [selectedReport, setSelectedReport] = useState<TrashReport | null>(null);
   const [selectedHotspot, setSelectedHotspot] = useState<MockHotspot | null>(null);
@@ -102,8 +111,16 @@ export default function ReporterMapScreen() {
   const mockSingletons = useMemo(() => getAllMockSingletons(), []);
   const singletons = useMemo(() => {
     const out: TrashReport[] = [];
+    const shouldShowReport = (report: TrashReport) =>
+      report.id === submittedReport?.id ||
+      isLocationWithinCampus(
+        report.reporterLocation,
+        selectedCampus,
+        MAP_REPORT_BOUNDARY_MARGIN_DEGREES
+      );
+
     for (const report of reportFeed.reports) {
-      if (isWithinCampusBounds(report.reporterLocation, selectedCampus)) {
+      if (shouldShowReport(report)) {
         out.push(report);
         if (out.length >= MAX_SINGLETON_MARKERS) {
           return out;
@@ -111,7 +128,7 @@ export default function ReporterMapScreen() {
       }
     }
     for (const report of mockSingletons) {
-      if (isWithinCampusBounds(report.reporterLocation, selectedCampus)) {
+      if (shouldShowReport(report)) {
         out.push(report);
         if (out.length >= MAX_SINGLETON_MARKERS) {
           return out;
@@ -119,7 +136,7 @@ export default function ReporterMapScreen() {
       }
     }
     return out;
-  }, [reportFeed.reports, mockSingletons, selectedCampus]);
+  }, [mockSingletons, reportFeed.reports, selectedCampus, submittedReport?.id]);
 
   const hotspots = useMemo(
     () => getMockHotspotsForCampus(selectedCampus.id),
@@ -131,7 +148,11 @@ export default function ReporterMapScreen() {
       CAMPUSES.map((campus) => {
         const realMetrics = computeMetrics(
           reportFeed.reports.filter((report) =>
-            isWithinCampusBounds(report.reporterLocation, campus)
+            isLocationWithinCampus(
+              report.reporterLocation,
+              campus,
+              MAP_REPORT_BOUNDARY_MARGIN_DEGREES
+            )
           ),
           reportFeed.activeAssignmentId
         );
@@ -164,6 +185,41 @@ export default function ReporterMapScreen() {
   useEffect(() => {
     mapRef.current?.animateToRegion(selectedCampus.region, 400);
   }, [selectedCampus]);
+
+  useEffect(() => {
+    if (!submittedReport) {
+      return;
+    }
+
+    if (lastFocusedSubmissionIdRef.current === submittedReport.id) {
+      return;
+    }
+
+    const submissionCampus = findCampusForLocation(
+      submittedReport.reporterLocation,
+      MAP_REPORT_BOUNDARY_MARGIN_DEGREES
+    );
+    if (submissionCampus.id !== selectedCampus.id) {
+      return;
+    }
+
+    lastFocusedSubmissionIdRef.current = submittedReport.id;
+    mapRef.current?.animateToRegion(
+      {
+        latitude: submittedReport.reporterLocation.latitude,
+        longitude: submittedReport.reporterLocation.longitude,
+        latitudeDelta: Math.min(selectedCampus.region.latitudeDelta, 0.006),
+        longitudeDelta: Math.min(selectedCampus.region.longitudeDelta, 0.006),
+      },
+      500
+    );
+  }, [
+    selectedCampus,
+    submittedReport,
+    submittedReport?.id,
+    submittedReport?.reporterLocation.latitude,
+    submittedReport?.reporterLocation.longitude,
+  ]);
 
   const panelCollapsedWidth = PANEL_BUTTON_SIZE;
   const panelExpandedWidth = Math.max(
@@ -710,16 +766,6 @@ function computeMetrics(
   };
 }
 
-function isWithinCampusBounds(location: Coordinates, campus: CampusDefinition) {
-  const { minLat, maxLat, minLon, maxLon } = campus.boundingBox;
-  return (
-    location.latitude >= minLat &&
-    location.latitude <= maxLat &&
-    location.longitude >= minLon &&
-    location.longitude <= maxLon
-  );
-}
-
 type HeatLevel = {
   radius: number;
   stroke: string;
@@ -1042,4 +1088,3 @@ const sheetStyles = StyleSheet.create({
     width: StyleSheet.hairlineWidth,
   },
 });
-

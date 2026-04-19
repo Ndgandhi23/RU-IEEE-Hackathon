@@ -30,27 +30,72 @@ class Frame:
     index: int  # monotonic counter of frames captured
 
 
-class Webcam:
+class FrameBuffer:
+    """Thread-safe latest-frame store shared by webcam and upload modes."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._cond = threading.Condition(self._lock)
+        self._latest: Frame | None = None
+        self._count = 0
+
+    def push_image(self, image: np.ndarray) -> Frame:
+        with self._cond:
+            frame = Frame(image=image, timestamp=time.monotonic(), index=self._count)
+            self._count += 1
+            self._latest = frame
+            self._cond.notify_all()
+        return frame
+
+    def get(self, max_age_s: float | None = None) -> Frame | None:
+        """Most recent frame, or None if none captured yet / stale."""
+        with self._lock:
+            f = self._latest
+        if f is None:
+            return None
+        if max_age_s is not None and time.monotonic() - f.timestamp > max_age_s:
+            return None
+        return f
+
+    def wait_next(self, after_index: int, timeout_s: float = 1.0) -> Frame | None:
+        """Block until a frame newer than `after_index` arrives, or timeout.
+
+        Used by the MJPEG server's per-client send loop so it sleeps on the
+        producer instead of polling. Returns None on timeout so callers can
+        periodically check connection state.
+        """
+        deadline = time.monotonic() + timeout_s
+        with self._cond:
+            while True:
+                f = self._latest
+                if f is not None and f.index > after_index:
+                    return f
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                self._cond.wait(timeout=remaining)
+
+
+class Webcam(FrameBuffer):
     def __init__(
         self,
-        device: int = 0,
+        device: int | None = 0,
         width: int = 640,
         height: int = 480,
         fps: int = 15,
     ) -> None:
+        super().__init__()
         self._device = device
         self._width = width
         self._height = height
         self._fps = fps
         self._cap: cv2.VideoCapture | None = None
-        self._lock = threading.Lock()
-        self._cond = threading.Condition(self._lock)
-        self._latest: Frame | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
-        self._count = 0
 
     def start(self) -> None:
+        if self._device is None:
+            raise RuntimeError("no webcam device configured")
         # V4L2 is the sane default on Linux; fall back to ANY if unavailable.
         self._cap = cv2.VideoCapture(self._device, cv2.CAP_V4L2)
         if not self._cap.isOpened():
@@ -93,39 +138,7 @@ class Webcam:
                 time.sleep(0.01)
                 continue
             failures = 0
-            frame = Frame(image=img, timestamp=time.monotonic(), index=self._count)
-            self._count += 1
-            with self._cond:
-                self._latest = frame
-                self._cond.notify_all()
-
-    def get(self, max_age_s: float | None = None) -> Frame | None:
-        """Most recent frame, or None if none captured yet / stale."""
-        with self._lock:
-            f = self._latest
-        if f is None:
-            return None
-        if max_age_s is not None and time.monotonic() - f.timestamp > max_age_s:
-            return None
-        return f
-
-    def wait_next(self, after_index: int, timeout_s: float = 1.0) -> Frame | None:
-        """Block until a frame newer than `after_index` arrives, or timeout.
-
-        Used by the MJPEG server's per-client send loop so it sleeps on the
-        grabber instead of polling. Returns None on timeout so callers can
-        periodically check connection state.
-        """
-        deadline = time.monotonic() + timeout_s
-        with self._cond:
-            while True:
-                f = self._latest
-                if f is not None and f.index > after_index:
-                    return f
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    return None
-                self._cond.wait(timeout=remaining)
+            self.push_image(img)
 
     def stop(self) -> None:
         self._stop.set()

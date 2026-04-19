@@ -46,28 +46,71 @@ you verify each loop.
 - Windows Firewall must allow inbound on **4000, 8080, 8765** from the
   private network. First run of each service will usually prompt you.
 
-Your laptop's current LAN IP is **`192.168.1.167`**. Every command below
-assumes that; if it changes, update the `.env` files and re-run
-`npx expo start`.
+Pick **one LAN IP** for the laptop that runs the relay (and, for bring-up,
+the mocked Pi + camera). Below it is **`192.168.1.167`** — replace it everywhere
+if `ipconfig` shows something else (`RUN.md` commands, both `.env` files,
+`demo.py --url` / `--relay-url`).
 
 ---
 
 ## 1. One-time configuration
 
-`robot-console/.env`:
+### Robot console (`robot-console/.env`)
 
-```
-EXPO_PUBLIC_API_BASE_URL=http://192.168.1.167:4000
-EXPO_PUBLIC_PI_WS_URL=ws://192.168.1.167:8765
-```
-
-`app/.env`:
+Copy `robot-console/.env.example` → `robot-console/.env` and set **only**:
 
 ```
 EXPO_PUBLIC_API_BASE_URL=http://192.168.1.167:4000
 ```
 
-If either `.env` changes you must restart the corresponding `npx expo start`.
+The console **automatically** uses **`ws://192.168.1.167:8765`** for the Pi
+tab — same hostname as the relay, port **8765**. That matches running the
+motor mock on the same laptop as Terminal 1 + 4 (see §2).
+
+**Optional:** set `EXPO_PUBLIC_PI_WS_URL` only if the real Raspberry Pi (motor
+controller) is **not** on the same machine as the relay, e.g.
+`ws://192.168.1.50:8765`.
+
+After any change, **restart** `npx expo start`. On **Logs** you should see:
+
+`boot: relay=http://… piWs=ws://… (derived from relay host)` — or no “derived”
+line if you set `EXPO_PUBLIC_PI_WS_URL` yourself.
+
+If `relay=(unset)`, `EXPO_PUBLIC_API_BASE_URL` was missing or the env file was
+not picked up.
+
+### Reporter app (`app/.env`)
+
+```
+EXPO_PUBLIC_API_BASE_URL=http://192.168.1.167:4000
+```
+
+Same host and port **4000** as `robot-console` — both apps talk only to the relay.
+
+Restart Expo after edits.
+
+### Same IP everywhere (reference)
+
+| What | Value |
+| ---- | ----- |
+| Relay HTTP | `http://<laptop-ip>:4000` |
+| Robot console | `EXPO_PUBLIC_API_BASE_URL` = that URL |
+| Reporter app | same `EXPO_PUBLIC_API_BASE_URL` |
+| Pi WebSocket (default) | `ws://<laptop-ip>:8765` — **no env line needed** |
+| MJPEG stream (camera mock) | `http://<laptop-ip>:8080/stream.mjpg` |
+| Classifier `--relay-url` | same as relay HTTP base |
+| Classifier `--url` (MJPEG) | `http://<laptop-ip>:8080/stream.mjpg` |
+
+---
+
+## 1b. What to do to test (minimal path)
+
+1. Set **`robot-console/.env`** and **`app/.env`** to your laptop IP (§1).
+2. Start **Terminal 1** (relay), **Terminal 3** (robot-console), **Terminal 2** (reporter app).
+3. On **phone B** (robot console): GPS tab → start tracking; Task tab should show relay traffic.
+4. On **phone A**: submit a report → phone B gets a task and Nav updates.
+5. **Optional — Pi WebSocket:** start **Terminal 4** (motor mock). On phone B → **Pi** tab → **Connect**. You should see `ws://<your-ip>:8765` under Pi URL (derived). Toggle motors only when ready.
+6. **Optional — camera + classifier:** Terminals 5–6 as in §2.
 
 ---
 
@@ -203,7 +246,49 @@ python demo.py --url http://192.168.1.167:8080/stream.mjpg --gate relay --relay-
 
 ---
 
-## 4. Exercising the Pi link (Terminal 4 required)
+## 4. Pi WebSocket link — configure and test
+
+The robot console does **not** auto-connect to the Pi. It computes the Pi
+WebSocket URL as **`ws://<relay-host>:8765`** unless you override with
+`EXPO_PUBLIC_PI_WS_URL` in `.env`. Toggle **Connect** on the **Pi** tab when
+you want a socket.
+
+### 4a. End-to-end checklist
+
+1. **Set the URL** (section 1). Start Terminal 4 (mock) or the Pi service
+   before connecting; use the Pi tab status line to confirm the socket.
+2. **Restart Expo** after editing `.env`.
+3. Open **Logs** on the console and confirm `boot: … piWs=ws://…` (not
+   `(unset)`).
+4. **Pi tab → Connect ON.** Status should go `connecting → open`. If it
+   sticks on `connecting` or `error`, see §6 (firewall, wrong IP, service not
+   listening).
+5. **Leave motors OFF** until you understand what the Nav tab will send.
+   With **Enable motors** off, the nav loop still computes PWM and shows
+   them in **Nav → Proposed motor command**, but nothing is sent — safe for
+   walking tests.
+6. **After arrival** (`Nav → Arrived: YES`), the nav loop normally stops
+   sending drive commands (motors would idle). To **test the WebSocket +
+   mock encoders after you've arrived**, either:
+   - use **Nav → Debug controls → Force navigate (ignore arrival)** so the
+     loop keeps issuing commands; or
+   - disconnect/reconnect the Pi tab, or use **Send STOP** between trials.
+
+### 4b. What "arrived" means for the Pi link
+
+- **Relay / classifier**: "arrived" is distance-based (Apple + thresholds).
+- **Pi WebSocket**: independent. The socket stays open; telemetry keeps
+  flowing. Only **motor commands** stop when the nav loop declares arrival,
+  unless you enable force-navigate or re-assign a new task.
+
+### 4c. Laptop mock (Terminal 4)
+
+```powershell
+python -m pi.motor_controller --mock --host 0.0.0.0 -v
+```
+
+No extra env line needed if the mock runs on the **same machine** as the relay
+(the Pi URL is derived from `EXPO_PUBLIC_API_BASE_URL`).
 
 On phone B's **Pi tab**:
 
@@ -219,6 +304,20 @@ On phone B's **Pi tab**:
 4. Disconnect the socket entirely. Within 500 ms the **Pi tab** reports
    `Watchdog: TRIPPED (motors halted)`. That's the Pi-side safety net
    confirming it halts motors on its own if commands stop flowing.
+
+### 4d. Real Pi (when the chassis exists)
+
+On the Pi (Linux), from the repo root, with pigpio / GPIO configured per
+`pi/motor_controller/README.md`:
+
+```bash
+python -m pi.motor_controller --host 0.0.0.0 -v
+```
+
+Set **`EXPO_PUBLIC_PI_WS_URL=ws://<pi-LAN-ip>:8765`** in `robot-console/.env`
+(the relay may still live on the laptop — override only the Pi host). The
+phone must be on the same subnet as the Pi; do not use `localhost` (that
+refers to the phone itself).
 
 ---
 
@@ -248,7 +347,8 @@ Remove-Item arrived.flag               # closes it again
 | Robot console: red `no relay` pill              | `.env` not loaded. Save, **stop** `npx expo start`, start it again.                |
 | Task tab relay log shows `✖ heartbeat` errors   | Firewall blocking 4000, or laptop IP changed. Re-check `ipconfig` and `.env`.      |
 | Task never gets assigned after submitting       | Terminal 1 logs should show `[apple-maps] …`. If it errors, MapKit token config.   |
-| Pi tab won't leave `connecting`                 | Terminal 4 not running, or firewall on 8765. `netstat -an | findstr 8765` to check.|
+| Pi tab won't leave `connecting`                 | Terminal 4 / Pi not running. Firewall on **8765**. Wrong relay IP → derived Pi URL points at the wrong host. Or set `EXPO_PUBLIC_PI_WS_URL` explicitly. |
+| `Pi URL: unset` on Pi tab                       | `EXPO_PUBLIC_API_BASE_URL` missing / invalid — fix `.env` and restart Expo (Pi URL is derived from the relay host). |
 | `motors LIVE` but PWM stays 0                   | Nav tab says why in "Reason" — usually no compass, or already arrived.             |
 | `demo.py` never opens a preview window          | Gate is closed. Inspect connector log; or run with `--gate always` to verify deps. |
 | `ModuleNotFoundError: ultralytics`              | Activate the venv and `pip install -r requirements.txt`.                           |

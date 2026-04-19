@@ -140,6 +140,17 @@ export type UseRobotNavOptions = {
   piLink: PiLink;
   /** Master enable — when false, compute everything but do NOT send drives. */
   enabled: boolean;
+  /**
+   * Debug override: when true, the loop never short-circuits on arrival.
+   * It keeps computing vector / bearing / motor decisions against the
+   * final waypoint even if you're sitting on top of it, so you can walk
+   * the phone around and watch Apple Maps re-route live.
+   *
+   * NOTE: motors still obey `enabled`. Turning this on with motors LIVE
+   * will make the robot actively chase the pin; leave motors in dry-run
+   * while testing route refresh behavior.
+   */
+  forceNavigate?: boolean;
   /** Optional debug log sink (ring buffer grows inside the hook too). */
   onLog?: (message: string) => void;
 };
@@ -148,6 +159,7 @@ export type UseRobotNavOptions = {
 
 export function useRobotNav(options: UseRobotNavOptions): NavState {
   const { task, pose, piLink, enabled, onLog } = options;
+  const forceNavigate = options.forceNavigate ?? false;
 
   // Cursor state. Kept in a ref so frequent GPS updates don't churn React.
   const waypointIndexRef = useRef(0);
@@ -168,28 +180,47 @@ export function useRobotNav(options: UseRobotNavOptions): NavState {
   }
 
   /**
-   * Resolve the route we'll navigate by. If Apple Maps gave us a real one
-   * with waypoints, use it. Otherwise, synthesize a single-waypoint route
-   * from `task.destination` so we can still compute distance + bearing and
-   * fire the arrival flag for short trips.
+   * Resolve the route we'll navigate by.
+   *
+   * Preference order:
+   *   1. Apple Maps route with a non-zero `distanceMeters` → use it as-is.
+   *      The waypoints are vertices along the walkway polyline.
+   *   2. Apple returned `distanceMeters == 0` → degenerate. Apple snapped
+   *      both the origin and the destination onto the same walkway node,
+   *      which can be tens of meters from the actual reporter pin. In that
+   *      case the snap polyline is useless (or worse, misleading), so we
+   *      fall back to a straight-line route to `task.destination`.
+   *   3. No Apple waypoints at all → straight-line to `task.destination`.
+   *   4. No task destination either → null (can't navigate).
    */
   function resolveRoute(): { route: NavRoute; synthetic: boolean } | null {
     if (!task) return null;
     const real = task.navigation;
-    if (real && real.waypoints.length > 0) {
+    const dest = task.destination ?? null;
+
+    // Apple's "already there" signal. Treat as degenerate and fall through
+    // to the straight-line fallback so we steer toward the true reporter
+    // pin instead of the snapped walkway node.
+    const appleDegenerate = real != null && real.distanceMeters === 0;
+
+    if (real && real.waypoints.length > 0 && !appleDegenerate) {
       return { route: real, synthetic: false };
     }
-    const dest = task.destination ?? null;
+
     if (!dest) return null;
     return {
       route: {
         waypoints: [dest],
+        // Preserve Apple's numbers (including the 0) so downstream code can
+        // still use them for the arrival gate.
         distanceMeters: real?.distanceMeters ?? null,
         expectedTravelTimeSeconds: real?.expectedTravelTimeSeconds ?? null,
         steps: [
           {
             index: 0,
-            instruction: 'Head to the report location',
+            instruction: appleDegenerate
+              ? 'Apple says you\'re already on the destination walkway — driving straight to the pin'
+              : 'Head to the report location',
             distanceMeters: real?.distanceMeters ?? null,
             expectedTravelTimeSeconds: real?.expectedTravelTimeSeconds ?? null,
             waypoints: [dest],
@@ -270,6 +301,9 @@ export function useRobotNav(options: UseRobotNavOptions): NavState {
       route.distanceMeters != null ? 'apple' : 'haversine';
 
     // Advance the cursor across any waypoints we're already close to.
+    // In `forceNavigate` debug mode, never advance past the final waypoint —
+    // we want to keep steering toward the pin so the operator can walk the
+    // phone around and watch the route refresh.
     let index = cursor;
     while (index < waypoints.length) {
       const wp = waypoints[index];
@@ -284,6 +318,7 @@ export function useRobotNav(options: UseRobotNavOptions): NavState {
         isFinal &&
         route.distanceMeters != null &&
         route.distanceMeters <= FINAL_ARRIVAL_M;
+      if (isFinal && forceNavigate) break;
       if (d > threshold && !closeByApple) break;
       index += 1;
       const why = closeByApple
@@ -293,10 +328,21 @@ export function useRobotNav(options: UseRobotNavOptions): NavState {
         `waypoint ${index - 1} reached (${why}); advancing to ${index}/${waypoints.length}`
       );
     }
+    // If force-navigate is on and the cursor is already past the final
+    // waypoint (e.g. we'd previously arrived before the operator flipped
+    // the switch), clamp it back to the final waypoint so we continue to
+    // have a valid target. Without this clamp we'd fall through to
+    // `waypoints[index]` being undefined and crash on `.latitude`.
+    if (forceNavigate && index >= waypoints.length) {
+      index = waypoints.length - 1;
+      pushDebug(
+        `force-navigate: clamping cursor back to final waypoint ${index + 1}/${waypoints.length}`
+      );
+    }
     waypointIndexRef.current = index;
 
-    // Past the last waypoint -> arrived.
-    if (index >= waypoints.length) {
+    // Past the last waypoint -> arrived. Skipped when `forceNavigate` is on.
+    if (index >= waypoints.length && !forceNavigate) {
       const next: NavDecision = {
         arrived: true,
         waypointIndex: waypoints.length,
@@ -381,6 +427,7 @@ export function useRobotNav(options: UseRobotNavOptions): NavState {
     pose.location?.longitude,
     pose.headingDeg,
     enabled,
+    forceNavigate,
   ]);
 
   const state: NavState = useMemo(() => {

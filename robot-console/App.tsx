@@ -84,7 +84,21 @@ type RelayIO = (
 // ===========================================================================
 
 const API_BASE_URL = process.env.EXPO_PUBLIC_API_BASE_URL?.replace(/\/$/, '') ?? '';
-const PI_WS_URL = process.env.EXPO_PUBLIC_PI_WS_URL?.replace(/\/$/, '') ?? '';
+
+/** Explicit override; if empty, we derive `ws://<relay-host>:8765` from `EXPO_PUBLIC_API_BASE_URL`. */
+const PI_WS_URL_EXPLICIT = process.env.EXPO_PUBLIC_PI_WS_URL?.replace(/\/$/, '').trim() ?? '';
+
+function derivePiWsUrlFromRelay(httpBase: string): string {
+  if (!httpBase) return '';
+  try {
+    const u = new URL(httpBase.startsWith('http') ? httpBase : `http://${httpBase}`);
+    return `ws://${u.hostname}:8765`;
+  } catch {
+    return '';
+  }
+}
+
+const PI_WS_URL = PI_WS_URL_EXPLICIT || derivePiWsUrlFromRelay(API_BASE_URL);
 const INITIAL_HEADING_TIMEOUT_MS = 3000;
 const IDLE_ASSIGNMENT_PING_MS = 8000;
 // While assigned, throttle outbound heartbeats so the relay can re-route
@@ -145,6 +159,7 @@ export default function App() {
   const [piStatus, setPiStatus] = useState<PiStatus>('idle');
   const [piWantsConnect, setPiWantsConnect] = useState(false);
   const [motorsEnabled, setMotorsEnabled] = useState(false);
+  const [navForceMode, setNavForceMode] = useState(false);
   const [piTelemetry, setPiTelemetry] = useState<PiTelemetry | null>(null);
 
   // --- Logging -------------------------------------------------------------
@@ -209,7 +224,7 @@ export default function App() {
       if (!PI_WS_URL) {
         Alert.alert(
           'Pi URL missing',
-          'Set EXPO_PUBLIC_PI_WS_URL in robot-console/.env (e.g. ws://192.168.1.50:8765).'
+          'Set EXPO_PUBLIC_API_BASE_URL in robot-console/.env (Pi WebSocket is derived as ws://<relay-host>:8765), or set EXPO_PUBLIC_PI_WS_URL if the motor controller is on another host.'
         );
         setPiWantsConnect(false);
         return;
@@ -260,14 +275,17 @@ export default function App() {
     pose,
     piLink,
     enabled: motorsEnabled && piStatus === 'open',
+    forceNavigate: navForceMode,
     onLog: (m) => pushLog('nav', m),
   });
 
   // --- Lifecycle -----------------------------------------------------------
 
   useEffect(() => {
+    const piNote =
+      PI_WS_URL && !PI_WS_URL_EXPLICIT ? ' (derived from relay host)' : '';
     pushSystem(
-      `boot: relay=${API_BASE_URL || '(unset)'} piWs=${PI_WS_URL || '(unset)'}`
+      `boot: relay=${API_BASE_URL || '(unset)'} piWs=${PI_WS_URL || '(unset)'}${piNote}`
     );
     return () => {
       stopTracking();
@@ -379,9 +397,15 @@ export default function App() {
       pushGps('tracking: starting watchPositionAsync');
       watchRef.current = await Location.watchPositionAsync(
         {
-          accuracy: Location.Accuracy.Balanced,
-          timeInterval: 2000,
-          distanceInterval: 2,
+          // `High` gives GNSS-class fixes (accuracy usually <10m outdoors)
+          // instead of the WiFi/cell-biased `Balanced` mode. We also drop
+          // `distanceInterval` to 0 and `timeInterval` to 1s so the UI sees
+          // fresh coordinates on every tick — otherwise iOS deduplicates
+          // small movements and the lat/lon readout appears frozen even as
+          // you walk around.
+          accuracy: Location.Accuracy.High,
+          timeInterval: 1000,
+          distanceInterval: 0,
         },
         (position) => {
           const nextLocation = normalizeCoordinates(
@@ -647,6 +671,22 @@ export default function App() {
                   }
                 : null
             }
+            forceNavigate={navForceMode}
+            onToggleForceNavigate={(v) => {
+              setNavForceMode(v);
+              pushSystem(`nav force-navigate ${v ? 'ON' : 'OFF'}`);
+            }}
+            onForceRefresh={() => {
+              const loc = currentLocationRef.current ?? packet.current;
+              if (!loc) {
+                pushSystem('force-refresh: no pose yet');
+                Alert.alert('No GPS fix', 'Start GPS tracking before refreshing.');
+                return;
+              }
+              pushSystem('force-refresh: manual heartbeat triggered');
+              void publishRobotLocation(loc, 'manual-refresh').catch(() => {});
+            }}
+            rawCurrent={packet.current}
             onMapsLog={pushSystem}
             logs={logsByCategory.nav}
           />
@@ -942,6 +982,10 @@ function NavTab({
   rawNavigation,
   pose,
   destination,
+  forceNavigate,
+  onToggleForceNavigate,
+  onForceRefresh,
+  rawCurrent,
   onMapsLog,
   logs,
 }: {
@@ -950,6 +994,10 @@ function NavTab({
   rawNavigation: RobotNavigation | null;
   pose: { location: LatLon | null; headingDeg: number | null };
   destination: LatLon | null;
+  forceNavigate: boolean;
+  onToggleForceNavigate: (v: boolean) => void;
+  onForceRefresh: () => void;
+  rawCurrent: Coordinates | null;
   onMapsLog: (msg: string) => void;
   logs: LogEntry[];
 }) {
@@ -994,6 +1042,100 @@ function NavTab({
   return (
     <>
       <Card
+        title="Live robot pose"
+        subtitle="What the phone sees right now from GNSS. Refreshes every GPS tick (~1 Hz). Max precision; compare against Apple Maps and the report coords."
+      >
+        <DataRow
+          label="Latitude"
+          value={rawCurrent ? rawCurrent.latitude.toFixed(8) : '—'}
+        />
+        <DataRow
+          label="Longitude"
+          value={rawCurrent ? rawCurrent.longitude.toFixed(8) : '—'}
+        />
+        <DataRow
+          label="Accuracy"
+          value={
+            rawCurrent?.accuracy != null
+              ? `±${rawCurrent.accuracy.toFixed(1)} m`
+              : 'unknown'
+          }
+        />
+        <DataRow
+          label="Heading"
+          value={
+            rawCurrent?.heading != null
+              ? `${rawCurrent.heading.toFixed(1)}° (±${rawCurrent.headingAccuracy?.toFixed(1) ?? '?'}°)`
+              : 'no compass'
+          }
+        />
+        <DataRow
+          label="Timestamp"
+          value={rawCurrent ? rawCurrent.timestamp : '—'}
+        />
+        {destination ? (
+          <>
+            <DataRow label="Report lat (frozen)" value={destination.latitude.toFixed(8)} />
+            <DataRow label="Report lon (frozen)" value={destination.longitude.toFixed(8)} />
+            <DataRow
+              label="Δlat / Δlon"
+              value={
+                rawCurrent
+                  ? `${(rawCurrent.latitude - destination.latitude).toExponential(3)} / ${(rawCurrent.longitude - destination.longitude).toExponential(3)}`
+                  : '—'
+              }
+            />
+          </>
+        ) : null}
+      </Card>
+
+      <Card
+        title="Debug controls"
+        subtitle="Nav-only overrides. These do not change the relay or the gate on the classifier."
+      >
+        <View style={styles.switchRow}>
+          <View style={styles.switchLabels}>
+            <Text style={styles.switchLabel}>Force navigate (ignore arrival)</Text>
+            <Text style={styles.switchHelp}>
+              When ON, the nav loop keeps computing vector/bearing/motor commands toward the final
+              waypoint even after you're close enough to have "arrived." Walk the phone farther
+              away and Apple Maps re-routes — you can watch the step list, waypoints and distance
+              update live. Motors still respect the LIVE/dry-run toggle on the Pi tab; keep motors
+              in dry-run while testing this so the robot doesn't chase you.
+            </Text>
+          </View>
+          <Switch value={forceNavigate} onValueChange={onToggleForceNavigate} />
+        </View>
+        {forceNavigate ? (
+          <View style={styles.diagnosticBox}>
+            <Text style={styles.diagnosticTitle}>⚠ Force-navigate is ON</Text>
+            <Text style={styles.diagnosticBody}>
+              Arrival is disabled. The classifier gate on the brain machine still uses the relay's
+              real pose + destination, so it will flip open on its own when you're actually close —
+              that behavior is unaffected.
+            </Text>
+          </View>
+        ) : null}
+
+        <Pressable
+          style={({ pressed }) => [
+            styles.mapsButton,
+            styles.mapsButtonSecondary,
+            pressed && styles.mapsButtonPressed,
+          ]}
+          onPress={onForceRefresh}
+        >
+          <Text style={styles.mapsButtonText}>Force refresh Apple route now</Text>
+        </Pressable>
+        <Text style={styles.helperText}>
+          Sends an immediate heartbeat with the current pose. The relay only re-fetches Apple when
+          its cache is &gt;15 s old or you've drifted &gt;5 m from the cached origin, so a fresh route
+          is most likely after you've actually walked somewhere new. Watch the relay's `[apple]`
+          logs to see a `cache miss` vs `cache hit`.
+        </Text>
+      </Card>
+
+      <Card
         title="Loop status"
         subtitle="Derives motor commands from GPS + compass and the Apple Maps step list."
       >
@@ -1004,7 +1146,9 @@ function NavTab({
             nav.route == null
               ? '—'
               : nav.routeSynthetic
-                ? 'straight-line fallback (no Apple steps)'
+                ? rawNavigation && rawNavigation.distanceMeters === 0
+                  ? 'straight-line (Apple distance=0, snap polyline ignored)'
+                  : 'straight-line fallback (no Apple steps)'
                 : 'Apple Maps step list'
           }
         />
@@ -1306,6 +1450,15 @@ function buildNavDiagnostic(
   }
 
   if (nav.routeSynthetic) {
+    const appleDegenerate =
+      rawNavigation != null && rawNavigation.distanceMeters === 0;
+    if (appleDegenerate) {
+      return {
+        title: 'Apple route is degenerate — driving straight to the pin',
+        body:
+          'Apple Maps snapped both your origin and the report destination onto the same walkway node and returned distanceMeters = 0. The stepPaths it sent back are on that walkway node, not at the actual reporter pin, so following them would drive the robot dozens of meters the wrong way. The nav loop is ignoring the snap polyline and steering by haversine + bearing to task.destination instead. "Arrived" will fire when haversine-to-pin < 3 m or Apple\'s total drops to 0 on the next refresh.',
+      };
+    }
     return {
       title: 'Straight-line fallback in use',
       body:

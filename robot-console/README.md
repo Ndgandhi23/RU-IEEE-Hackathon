@@ -29,16 +29,16 @@ laptop.
 
 ## Environment
 
-Copy `.env.example` to `.env` and fill in:
+Copy `.env.example` to `.env` and set:
 
 ```
 EXPO_PUBLIC_API_BASE_URL=http://<laptop-relay>:4000
-EXPO_PUBLIC_PI_WS_URL=ws://<pi-ip>:8765
 ```
 
-Leave `EXPO_PUBLIC_PI_WS_URL` blank to run the console in GPS-only mode
-(no motor link) — useful for bringing up the relay + map flow without the
-Pi present.
+The app derives **`ws://<same-host-as-relay>:8765`** for the Pi WebSocket unless
+you set **`EXPO_PUBLIC_PI_WS_URL`** (use that when the motor controller runs on
+a different machine than the relay). Leave **Connect** off on the Pi tab until
+you want motors; relay + Nav work without opening the socket.
 
 ## Full-loop test run
 

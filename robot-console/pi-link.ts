@@ -3,23 +3,32 @@
 // Protocol mirrors `pi/motor_controller/ws_server.py`:
 //
 //   Commands (phone -> Pi):
-//     { "type": "drive", "left": -255..255, "right": -255..255 }
-//     { "type": "stop" }
-//     { "type": "reset_encoders" }
+//     { "cmd": "drive", "left": -255..255, "right": -255..255 }
+//     { "cmd": "stop" }
+//     { "cmd": "reset_encoders" }
 //
 //   Telemetry (Pi -> phone, ~20Hz):
-//     { "type": "telemetry", "ts": ..., "encoders": { "left": n, "right": n },
-//       "motors": { "left": pwm, "right": pwm }, "watchdog_ok": bool }
+//     { "type": "state", "ts": ..., "encoders": { "left": n, "right": n },
+//       "motors": { "left_pwm": pwm, "right_pwm": pwm }, "watchdog_ok": bool }
 //
-// The client auto-reconnects with a capped exponential backoff. The phone
-// never holds state that the Pi needs — if the socket drops mid-drive, the
-// Pi's 500ms watchdog halts the motors on its own.
+// The client normalizes the raw Pi state into a UI-friendly `PiTelemetry`
+// shape so the rest of the app doesn't depend on the wire-format field names.
+// The client auto-reconnects with a capped exponential backoff. If the socket
+// drops mid-drive, the Pi's 500ms watchdog halts the motors on its own.
 
 export type PiTelemetry = {
   type: 'telemetry';
   ts: number;
   encoders: { left: number; right: number };
   motors: { left: number; right: number };
+  watchdog_ok: boolean;
+};
+
+type PiStateMessage = {
+  type: 'state';
+  ts: number;
+  encoders: { left: number; right: number };
+  motors: { left_pwm: number; right_pwm: number };
   watchdog_ok: boolean;
 };
 
@@ -87,18 +96,18 @@ export class PiLink {
 
   sendDrive(left: number, right: number): boolean {
     return this.send({
-      type: 'drive',
+      cmd: 'drive',
       left: clampPwm(left),
       right: clampPwm(right),
     });
   }
 
   sendStop(): boolean {
-    return this.send({ type: 'stop' });
+    return this.send({ cmd: 'stop' });
   }
 
   sendResetEncoders(): boolean {
-    return this.send({ type: 'reset_encoders' });
+    return this.send({ cmd: 'reset_encoders' });
   }
 
   /** Milliseconds since the last outbound command was sent. */
@@ -159,12 +168,20 @@ export class PiLink {
         return;
       }
 
-      if (
-        parsed &&
-        typeof parsed === 'object' &&
-        (parsed as { type?: string }).type === 'telemetry'
-      ) {
-        this.emit({ kind: 'telemetry', telemetry: parsed as PiTelemetry });
+      if (isPiStateMessage(parsed)) {
+        this.emit({
+          kind: 'telemetry',
+          telemetry: {
+            type: 'telemetry',
+            ts: parsed.ts,
+            encoders: parsed.encoders,
+            motors: {
+              left: parsed.motors.left_pwm,
+              right: parsed.motors.right_pwm,
+            },
+            watchdog_ok: parsed.watchdog_ok,
+          },
+        });
       }
     };
 
@@ -226,4 +243,18 @@ function clampPwm(value: number): number {
 function errorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
   return String(error);
+}
+
+function isPiStateMessage(value: unknown): value is PiStateMessage {
+  if (!value || typeof value !== 'object') return false;
+  const msg = value as Partial<PiStateMessage>;
+  return (
+    msg.type === 'state' &&
+    typeof msg.ts === 'number' &&
+    typeof msg.watchdog_ok === 'boolean' &&
+    typeof msg.encoders?.left === 'number' &&
+    typeof msg.encoders?.right === 'number' &&
+    typeof msg.motors?.left_pwm === 'number' &&
+    typeof msg.motors?.right_pwm === 'number'
+  );
 }

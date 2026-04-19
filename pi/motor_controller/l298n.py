@@ -9,6 +9,10 @@ L298N direction logic per channel:
 We never brake — coast-to-stop is gentler on the chip and the mechanics.
 Signed PWM convention: +N = forward, -N = reverse, 0 = coast, |N| ≤ 255.
 
+The real driver assumes ENA / ENB are strapped high. Signed speed control is
+implemented by PWM-ing the active direction input pin (IN1 or IN2) while
+holding the opposite pin low.
+
 `open_driver` returns the real pigpio-backed driver on a Pi, or a Mock
 driver off-target (e.g. your Windows laptop during dev) so the rest of the
 stack is runnable without hardware.
@@ -43,7 +47,11 @@ class _MotorDriverBase:
 
 
 class PigpioL298N(_MotorDriverBase):
-    """Real hardware implementation — hardware PWM via pigpio."""
+    """Real hardware implementation.
+
+    ENA / ENB are treated as always-enabled. We PWM the active direction pin so
+    the existing signed-speed protocol still supports proportional turning.
+    """
 
     def __init__(self, pi, left: MotorPins, right: MotorPins) -> None:
         super().__init__()
@@ -56,10 +64,14 @@ class PigpioL298N(_MotorDriverBase):
         for pin in (left.in1, left.in2, right.in1, right.in2):
             pi.set_mode(pin, _OUTPUT)
             pi.write(pin, 0)
+            pi.set_PWM_range(pin, PWM_RANGE)
+            pi.set_PWM_frequency(pin, PWM_FREQUENCY_HZ)
+            pi.set_PWM_dutycycle(pin, 0)
         for en in (left.enable, right.enable):
-            pi.set_PWM_range(en, PWM_RANGE)
-            pi.set_PWM_frequency(en, PWM_FREQUENCY_HZ)
-            pi.set_PWM_dutycycle(en, 0)
+            if en is None:
+                continue
+            pi.set_mode(en, _OUTPUT)
+            pi.write(en, 1)
 
     def set_pwm(self, left: int, right: int) -> None:
         left = _clip(left)
@@ -71,17 +83,18 @@ class PigpioL298N(_MotorDriverBase):
 
     def _apply(self, pins: MotorPins, pwm: int) -> None:
         if pwm > 0:
-            self._pi.write(pins.in1, 1)
+            self._pi.set_PWM_dutycycle(pins.in2, 0)
             self._pi.write(pins.in2, 0)
-            self._pi.set_PWM_dutycycle(pins.enable, pwm)
+            self._pi.set_PWM_dutycycle(pins.in1, pwm)
         elif pwm < 0:
+            self._pi.set_PWM_dutycycle(pins.in1, 0)
             self._pi.write(pins.in1, 0)
-            self._pi.write(pins.in2, 1)
-            self._pi.set_PWM_dutycycle(pins.enable, -pwm)
+            self._pi.set_PWM_dutycycle(pins.in2, -pwm)
         else:
+            self._pi.set_PWM_dutycycle(pins.in1, 0)
+            self._pi.set_PWM_dutycycle(pins.in2, 0)
             self._pi.write(pins.in1, 0)
             self._pi.write(pins.in2, 0)
-            self._pi.set_PWM_dutycycle(pins.enable, 0)
 
     def stop(self) -> None:
         self.set_pwm(0, 0)

@@ -6,6 +6,11 @@ This is the **transmit** side of the Pi camera proxy described in
 [`writeup/CLAUDE.md`](../../writeup/CLAUDE.md). The brain laptop connects to
 this stream and feeds frames into the same YOLO `Detector` used by `demo.py`.
 
+The service can run in two modes:
+
+- `webcam` mode: capture frames from a USB camera on the Pi
+- `upload` mode: accept a fresh image file over HTTP and publish it as the latest frame
+
 ```
 ┌────────────────┐   USB    ┌──────────────────────────┐   HTTP/MJPEG   ┌──────────────────┐
 │ Logitech C270  ├─────────>│  Raspberry Pi 3B         ├───────────────>│  Brain laptop     │
@@ -35,6 +40,7 @@ every decision lives on the brain.
 | `/stream.mjpg`   | `multipart/x-mixed-replace` | Main MJPEG stream. This is what the brain consumes. |
 | `/frame.jpg`     | `image/jpeg`             | Latest single frame. Handy for `curl` smoke-tests. |
 | `/healthz`       | `application/json`       | `{"ok": true, "frames": N, "age_s": F}`. |
+| `/upload`        | `multipart/form-data` or raw image body | Publish a new JPEG/PNG/WebP frame to the streamer. |
 
 Per-frame MJPEG parts include `X-Frame-Index` and `X-Timestamp` headers so
 the brain can detect freezes and log capture latency.
@@ -55,18 +61,21 @@ Launch, from the **repo root** (so the `pi` package is importable):
 python3 -m pi.camera_streamer             # serves http://<pi-ip>:8080/stream.mjpg
 python3 -m pi.camera_streamer --device 1  # different USB cam
 python3 -m pi.camera_streamer --width 1280 --height 720 --fps 30 --quality 75
+python3 -m pi.camera_streamer --source upload
 ```
 
 Flags:
 
 ```
 --device N       V4L2 index (default 0 = /dev/video0)
+--source MODE    webcam or upload (default webcam)
 --width  W       capture width  (default 640)
 --height H       capture height (default 480)
 --fps    F       requested FPS  (default 15)
 --host   IP      bind address   (default 0.0.0.0)
 --port   P       HTTP port      (default 8080)
 --quality Q      JPEG quality   (default 80, range 1-100)
+--accept-uploads enable POST /upload in webcam mode too
 -v               DEBUG logs
 ```
 
@@ -90,6 +99,40 @@ curl -s http://<pi-ip>:8080/healthz
 ```
 
 Browser preview: visit `http://<pi-ip>:8080/` and you'll see the live stream.
+
+## Upload mode
+
+If you want the phone or another device to send still images to the Pi instead
+of using a USB webcam, run:
+
+```bash
+python3 -m pi.camera_streamer --source upload --host 0.0.0.0 -v
+```
+
+Then publish a frame with either multipart form data:
+
+```bash
+curl -X POST -F "photo=@test.jpg" http://<pi-ip>:8080/upload
+```
+
+or a raw image body:
+
+```bash
+curl -X POST \
+  -H "Content-Type: image/jpeg" \
+  --data-binary @test.jpg \
+  http://<pi-ip>:8080/upload
+```
+
+After the upload succeeds, the latest frame is available immediately at:
+
+```text
+http://<pi-ip>:8080/frame.jpg
+http://<pi-ip>:8080/stream.mjpg
+```
+
+That means the laptop-side classifier does not need any changes when the source
+switches from a Pi webcam to phone-uploaded images.
 
 ## Feeding the stream into the same classifier `demo.py` uses
 

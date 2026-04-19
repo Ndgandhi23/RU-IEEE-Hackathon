@@ -1,6 +1,6 @@
 import { createContext, PropsWithChildren, useContext, useEffect, useMemo, useState } from 'react';
 
-import { CAMPUSES, CampusId } from '@/constants/campuses';
+import { CAMPUSES, CampusId, findCampusForLocation } from '@/constants/campuses';
 import { fetchReportFeed } from '@/services/routing-api';
 import { ReportFeed, RouteResponseMode, TrashReport } from '@/types/routing';
 
@@ -29,6 +29,7 @@ const emptyFeed: ReportFeed = {
   activeAssignmentId: null,
   reports: [],
 };
+const REPORT_FEED_POLL_INTERVAL_MS = 5000;
 
 const ReporterContext = createContext<ReporterContextValue | null>(null);
 
@@ -45,7 +46,7 @@ export function ReporterProvider({ children }: PropsWithChildren) {
 
     const interval = setInterval(() => {
       void refreshReportFeed(false);
-    }, 15000);
+    }, REPORT_FEED_POLL_INTERVAL_MS);
 
     return () => clearInterval(interval);
   }, []);
@@ -66,6 +67,12 @@ export function ReporterProvider({ children }: PropsWithChildren) {
       setFeedBusy(true);
       const nextFeed = await fetchReportFeed();
       setReportFeed(nextFeed);
+      setSubmittedReport((current) => {
+        if (!current) {
+          return current;
+        }
+        return nextFeed.reports.find((report) => report.id === current.id) ?? current;
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const isOfflineOrTimeout = /timed out|network request failed|failed to fetch|aborted/i.test(
@@ -96,6 +103,11 @@ export function ReporterProvider({ children }: PropsWithChildren) {
   function registerSubmission(report: TrashReport, mode: RouteResponseMode) {
     setSubmittedReport(report);
     setSubmitMode(mode);
+    setSelectedCampusId(findCampusForLocation(report.reporterLocation).id);
+    setReportFeed((current) => ({
+      ...current,
+      reports: [report, ...current.reports.filter((candidate) => candidate.id !== report.id)],
+    }));
   }
 
   const value = useMemo<ReporterContextValue>(
